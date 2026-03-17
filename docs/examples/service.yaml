@@ -1,0 +1,17 @@
+# ClusterIP service exposing the OpenClaw gateway on Kubernetes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: openclaw
+  namespace: alice-myagent-openclaw
+  labels:
+    app: openclaw
+spec:
+  type: ClusterIP
+  selector:
+    app: openclaw
+  ports:
+    - name: gateway
+      port: 18789
+      targetPort: 18789
+      protocol: TCP
