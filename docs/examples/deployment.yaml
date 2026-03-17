@@ -60,7 +60,7 @@ spec:
               mountPath: /cron-src
       containers:
         - name: gateway
-          image: ghcr.io/openclaw/openclaw:latest
+          image: quay.io/aicatalyst/openclaw:latest
           imagePullPolicy: Always
           command:
             - node

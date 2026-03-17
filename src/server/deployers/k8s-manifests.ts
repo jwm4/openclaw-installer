@@ -1,6 +1,6 @@
 import * as k8s from "@kubernetes/client-node";
 import {
-  DEFAULT_IMAGE,
+  defaultImage,
   agentId,
   tryParseProjectId,
   buildOpenClawConfig,
@@ -187,7 +187,7 @@ export function deploymentManifest(
   agentTreeEntries: TreeEntry[] = [],
   cronJobsContent?: string,
 ): k8s.V1Deployment {
-  const image = config.image || DEFAULT_IMAGE;
+  const image = defaultImage(config);
   const id = agentId(config);
 
   const envVars: k8s.V1EnvVar[] = [
