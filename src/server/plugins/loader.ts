@@ -16,7 +16,7 @@ async function discoverProviderPlugins(registry: DeployerRegistry): Promise<void
 
   if (!existsSync(providerPluginsDir)) return;
 
-  let entries: Awaited<ReturnType<typeof readdir>>;
+  let entries;
   try {
     entries = await readdir(providerPluginsDir, { withFileTypes: true });
   } catch {
@@ -26,7 +26,7 @@ async function discoverProviderPlugins(registry: DeployerRegistry): Promise<void
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
 
-    const name = entry.name;
+    const name = String(entry.name);
     const srcIndex = join(providerPluginsDir, name, "src", "index.ts");
     const jsIndex = join(providerPluginsDir, name, "src", "index.js");
 
