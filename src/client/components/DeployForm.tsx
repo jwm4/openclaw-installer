@@ -1197,7 +1197,10 @@ export default function DeployForm({ onDeployStarted }: Props) {
           <label>Provider</label>
           <select
             value={inferenceProvider}
-            onChange={(e) => setInferenceProvider(e.target.value as InferenceProvider)}
+            onChange={(e) => {
+              setInferenceProvider(e.target.value as InferenceProvider);
+              update("agentModel", ""); // Fix for #23: clear provider-specific model on switch
+            }}
           >
             {PROVIDER_OPTIONS.map((p) => (
               <option key={p.id} value={p.id}>{p.label}</option>
