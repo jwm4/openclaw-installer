@@ -657,6 +657,8 @@ something that requires the user's attention.`;
     const initScript = [
       // Write openclaw.json only if missing (don't overwrite live config)
       `test -f /home/node/.openclaw/openclaw.json || echo '${esc(ocConfig)}' > /home/node/.openclaw/openclaw.json`,
+      // Always update allowedOrigins to match the current port (fixes re-deploy with different port)
+      `node -e "const fs=require('fs');const p='/home/node/.openclaw/openclaw.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));if(c.gateway&&c.gateway.controlUi){c.gateway.controlUi.allowedOrigins=['http://localhost:${port}','http://127.0.0.1:${port}'];fs.writeFileSync(p,JSON.stringify(c,null,2))}"`,
       // Materialize SSH sandbox auth files into the writable volume for the node user.
       `mkdir -p '${SANDBOX_SSH_DIR}'`,
       ...(localSandboxPrepared.effectiveConfig.sandboxSshIdentity
