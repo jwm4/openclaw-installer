@@ -103,7 +103,6 @@ export default function InstanceList({ active }: { active: boolean }) {
   const [instances, setInstances] = useState<Instance[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [includeK8s, setIncludeK8s] = useState(false);
   const [k8sAvailable, setK8sAvailable] = useState(false);
   const [acting, setActing] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<string, ExpandedPanel>>({});
@@ -111,7 +110,8 @@ export default function InstanceList({ active }: { active: boolean }) {
 
   const fetchInstances = async () => {
     try {
-      const res = await fetch(includeK8s ? "/api/instances?includeK8s=1" : "/api/instances");
+      // Fix for #61: auto-include K8s instances when cluster is reachable
+      const res = await fetch(k8sAvailable ? "/api/instances?includeK8s=1" : "/api/instances");
       if (!res.ok) {
         throw new Error(`Failed to load instances (${res.status})`);
       }
@@ -134,22 +134,15 @@ export default function InstanceList({ active }: { active: boolean }) {
       })
       .catch(() => {
         setK8sAvailable(false);
-        setIncludeK8s(false);
       });
   }, []);
-
-  useEffect(() => {
-    if (!k8sAvailable && includeK8s) {
-      setIncludeK8s(false);
-    }
-  }, [k8sAvailable, includeK8s]);
 
   useEffect(() => {
     setLoading(true);
     fetchInstances();
     const interval = setInterval(fetchInstances, 5000);
     return () => clearInterval(interval);
-  }, [includeK8s]);
+  }, [k8sAvailable]);
 
   // Fix for #5: fetch immediately when the Instances tab becomes visible
   useEffect(() => {
@@ -157,12 +150,6 @@ export default function InstanceList({ active }: { active: boolean }) {
       fetchInstances();
     }
   }, [active]);
-
-  const k8sToggle = k8sAvailable ? (
-    <button className="btn btn-ghost" onClick={() => setIncludeK8s((prev) => !prev)}>
-      {includeK8s ? "Hide K8s" : "Include K8s"}
-    </button>
-  ) : null;
 
   const handleStart = async (id: string) => {
     setActing(id);
@@ -255,9 +242,6 @@ export default function InstanceList({ active }: { active: boolean }) {
   if (loading) {
     return (
       <div className="card">
-        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.75rem" }}>
-          {k8sToggle}
-        </div>
         Loading...
       </div>
     );
@@ -266,9 +250,6 @@ export default function InstanceList({ active }: { active: boolean }) {
   if (error) {
     return (
       <div className="card">
-        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.75rem" }}>
-          {k8sToggle}
-        </div>
         <strong>Could not load instances.</strong>
         <div style={{ marginTop: "0.5rem", color: "var(--text-secondary)", fontSize: "0.9rem" }}>
           {error}
@@ -280,9 +261,6 @@ export default function InstanceList({ active }: { active: boolean }) {
   if (instances.length === 0) {
     return (
       <div className="card">
-        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.75rem" }}>
-          {k8sToggle}
-        </div>
         <div className="empty-state">
           <div className="empty-icon">📦</div>
           <p>No OpenClaw instances found</p>
@@ -297,9 +275,6 @@ export default function InstanceList({ active }: { active: boolean }) {
 
   return (
     <div className="card" style={{ padding: 0 }}>
-      <div style={{ display: "flex", justifyContent: "flex-end", padding: "1rem 1rem 0" }}>
-        {k8sToggle}
-      </div>
       {instances.map((inst) => {
         const isActing = acting === inst.id;
         const activePanel = expanded[inst.id];

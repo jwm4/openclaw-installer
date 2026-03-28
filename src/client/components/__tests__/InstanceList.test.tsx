@@ -381,8 +381,7 @@ describe("InstanceList", () => {
     });
   });
 
-  it("lets the user opt into cluster instances when k8s is available", async () => {
-    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  it("auto-includes cluster instances when k8s is available (fix for #61)", async () => {
     const fetchMock = vi.fn((url: string, opts?: RequestInit) => {
       if (url === "/api/health") {
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ k8sAvailable: true }) });
@@ -396,18 +395,9 @@ describe("InstanceList", () => {
 
     render(<InstanceList active />);
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /include k8s/i })).toBeInTheDocument();
-    });
-    expect(fetchMock).toHaveBeenCalledWith("/api/instances");
-
-    await user.click(screen.getByRole("button", { name: /include k8s/i }));
-    await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith("/api/instances?includeK8s=1");
     });
-
-    await user.click(screen.getByRole("button", { name: /hide k8s/i }));
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith("/api/instances");
-    });
+    // Toggle button should no longer exist
+    expect(screen.queryByRole("button", { name: /include k8s/i })).not.toBeInTheDocument();
   });
 });
