@@ -57,6 +57,12 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
   const [modelEndpointOptions, setModelEndpointOptions] = useState<ModelEndpointOption[]>([]);
   const [loadingModelEndpointOptions, setLoadingModelEndpointOptions] = useState(false);
   const [modelEndpointOptionsError, setModelEndpointOptionsError] = useState<string | null>(null);
+  const [anthropicModelOptions, setAnthropicModelOptions] = useState<ModelEndpointOption[]>([]);
+  const [loadingAnthropicModels, setLoadingAnthropicModels] = useState(false);
+  const [anthropicModelsError, setAnthropicModelsError] = useState<string | null>(null);
+  const [openaiModelOptions, setOpenaiModelOptions] = useState<ModelEndpointOption[]>([]);
+  const [loadingOpenaiModels, setLoadingOpenaiModels] = useState(false);
+  const [openaiModelsError, setOpenaiModelsError] = useState<string | null>(null);
   const previousModelEndpointRef = useRef("");
 
   const isClusterMode = mode === "kubernetes" || mode === "openshift";
@@ -413,6 +419,58 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
       setModelEndpointOptionsError(err instanceof Error ? err.message : "Failed to fetch endpoint models");
     } finally {
       setLoadingModelEndpointOptions(false);
+    }
+  };
+
+  const fetchAnthropicModelOptions = async () => {
+    const apiKey = config.anthropicApiKey.trim();
+    if (!apiKey && !defaults?.hasAnthropicKey) {
+      setAnthropicModelsError("Enter an Anthropic API key first.");
+      return;
+    }
+    setLoadingAnthropicModels(true);
+    setAnthropicModelsError(null);
+    try {
+      const res = await fetch("/api/configs/anthropic-models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: apiKey || undefined }),
+      });
+      const data = await res.json() as { models?: ModelEndpointOption[]; error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || `Failed to fetch models (${res.status})`);
+      }
+      setAnthropicModelOptions(Array.isArray(data.models) ? data.models : []);
+    } catch (err) {
+      setAnthropicModelsError(err instanceof Error ? err.message : "Failed to fetch Anthropic models");
+    } finally {
+      setLoadingAnthropicModels(false);
+    }
+  };
+
+  const fetchOpenaiModelOptions = async () => {
+    const apiKey = config.openaiApiKey.trim();
+    if (!apiKey && !defaults?.hasOpenaiKey) {
+      setOpenaiModelsError("Enter an OpenAI API key first.");
+      return;
+    }
+    setLoadingOpenaiModels(true);
+    setOpenaiModelsError(null);
+    try {
+      const res = await fetch("/api/configs/openai-models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: apiKey || undefined }),
+      });
+      const data = await res.json() as { models?: ModelEndpointOption[]; error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || `Failed to fetch models (${res.status})`);
+      }
+      setOpenaiModelOptions(Array.isArray(data.models) ? data.models : []);
+    } catch (err) {
+      setOpenaiModelsError(err instanceof Error ? err.message : "Failed to fetch OpenAI models");
+    } finally {
+      setLoadingOpenaiModels(false);
     }
   };
 
@@ -992,6 +1050,14 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
           setConfig={setConfig}
           setInferenceProvider={setInferenceProvider}
           update={update}
+          fetchAnthropicModels={fetchAnthropicModelOptions}
+          fetchOpenaiModels={fetchOpenaiModelOptions}
+          loadingAnthropicModels={loadingAnthropicModels}
+          loadingOpenaiModels={loadingOpenaiModels}
+          anthropicModelOptions={anthropicModelOptions}
+          openaiModelOptions={openaiModelOptions}
+          anthropicModelsError={anthropicModelsError}
+          openaiModelsError={openaiModelsError}
         />
 
         <h3 style={{ marginTop: "1.5rem" }}>Observability</h3>

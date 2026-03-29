@@ -25,6 +25,14 @@ interface ProviderSectionProps {
   mode: string;
   modelEndpointOptions: ModelEndpointOption[];
   modelEndpointOptionsError: string | null;
+  fetchAnthropicModels: () => Promise<void>;
+  fetchOpenaiModels: () => Promise<void>;
+  loadingAnthropicModels: boolean;
+  loadingOpenaiModels: boolean;
+  anthropicModelOptions: Array<{ id: string; name: string }>;
+  openaiModelOptions: Array<{ id: string; name: string }>;
+  anthropicModelsError: string | null;
+  openaiModelsError: string | null;
   setConfig: Dispatch<SetStateAction<DeployFormConfig>>;
   setInferenceProvider: Dispatch<SetStateAction<InferenceProvider>>;
   update: (field: string, value: string) => void;
@@ -54,6 +62,14 @@ export function ProviderSection({
   mode,
   modelEndpointOptions,
   modelEndpointOptionsError,
+  fetchAnthropicModels,
+  fetchOpenaiModels,
+  loadingAnthropicModels,
+  loadingOpenaiModels,
+  anthropicModelOptions,
+  openaiModelOptions,
+  anthropicModelsError,
+  openaiModelsError,
   setConfig,
   setInferenceProvider,
   update,
@@ -120,6 +136,94 @@ export function ProviderSection({
                 Adds this Anthropic model to the OpenClaw model picker as <code>anthropic/&lt;model&gt;</code>.
               </div>
             </div>
+            <div className="form-group">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <label>Additional Models</label>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ fontSize: "0.8rem", padding: "0.25rem 0.5rem" }}
+                  onClick={fetchAnthropicModels}
+                  disabled={loadingAnthropicModels}
+                >
+                  {loadingAnthropicModels ? "Fetching..." : "Browse Models"}
+                </button>
+              </div>
+              {anthropicModelsError && (
+                <div className="hint" style={{ color: "#e74c3c" }}>{anthropicModelsError}</div>
+              )}
+              {anthropicModelOptions.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", marginBottom: "0.5rem", maxHeight: "200px", overflowY: "auto", border: "1px solid var(--border)", borderRadius: "6px", padding: "0.5rem" }}>
+                  {anthropicModelOptions.map((option) => {
+                    const checked = config.anthropicModels.includes(option.id);
+                    return (
+                      <label key={option.id} style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem", cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            setConfig((prev) => ({
+                              ...prev,
+                              anthropicModels: checked
+                                ? prev.anthropicModels.filter((m) => m !== option.id)
+                                : [...prev.anthropicModels, option.id],
+                            }));
+                          }}
+                          style={{ width: "auto" }}
+                        />
+                        <code>{option.id}</code>
+                        {option.name !== option.id && <span style={{ color: "var(--text-secondary)" }}>({option.name})</span>}
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+              {config.anthropicModels.map((modelId, index) => (
+                <div key={index} style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.25rem" }}>
+                  <input
+                    type="text"
+                    placeholder="e.g., claude-opus-4-6"
+                    value={modelId}
+                    onChange={(e) => {
+                      setConfig((prev) => ({
+                        ...prev,
+                        anthropicModels: prev.anthropicModels.map((m, i) => i === index ? e.target.value : m),
+                      }));
+                    }}
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ padding: "0.25rem 0.5rem" }}
+                    onClick={() => {
+                      setConfig((prev) => ({
+                        ...prev,
+                        anthropicModels: prev.anthropicModels.filter((_, i) => i !== index),
+                      }));
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ fontSize: "0.85rem", padding: "0.25rem 0.5rem", marginTop: "0.25rem" }}
+                onClick={() => {
+                  setConfig((prev) => ({
+                    ...prev,
+                    anthropicModels: [...prev.anthropicModels, ""],
+                  }));
+                }}
+              >
+                + Add Model
+              </button>
+              <div className="hint">
+                Additional models appear in the OpenClaw model picker as <code>anthropic/&lt;model&gt;</code>.
+              </div>
+            </div>
           </>
         );
 
@@ -151,6 +255,93 @@ export function ProviderSection({
               />
               <div className="hint">
                 Adds this OpenAI model to the OpenClaw model picker as <code>openai/&lt;model&gt;</code>.
+              </div>
+            </div>
+            <div className="form-group">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <label>Additional Models</label>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ fontSize: "0.8rem", padding: "0.25rem 0.5rem" }}
+                  onClick={fetchOpenaiModels}
+                  disabled={loadingOpenaiModels}
+                >
+                  {loadingOpenaiModels ? "Fetching..." : "Browse Models"}
+                </button>
+              </div>
+              {openaiModelsError && (
+                <div className="hint" style={{ color: "#e74c3c" }}>{openaiModelsError}</div>
+              )}
+              {openaiModelOptions.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", marginBottom: "0.5rem", maxHeight: "200px", overflowY: "auto", border: "1px solid var(--border)", borderRadius: "6px", padding: "0.5rem" }}>
+                  {openaiModelOptions.map((option) => {
+                    const checked = config.openaiModels.includes(option.id);
+                    return (
+                      <label key={option.id} style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem", cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            setConfig((prev) => ({
+                              ...prev,
+                              openaiModels: checked
+                                ? prev.openaiModels.filter((m) => m !== option.id)
+                                : [...prev.openaiModels, option.id],
+                            }));
+                          }}
+                          style={{ width: "auto" }}
+                        />
+                        <code>{option.id}</code>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+              {config.openaiModels.map((modelId, index) => (
+                <div key={index} style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.25rem" }}>
+                  <input
+                    type="text"
+                    placeholder="e.g., gpt-5.3"
+                    value={modelId}
+                    onChange={(e) => {
+                      setConfig((prev) => ({
+                        ...prev,
+                        openaiModels: prev.openaiModels.map((m, i) => i === index ? e.target.value : m),
+                      }));
+                    }}
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ padding: "0.25rem 0.5rem" }}
+                    onClick={() => {
+                      setConfig((prev) => ({
+                        ...prev,
+                        openaiModels: prev.openaiModels.filter((_, i) => i !== index),
+                      }));
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ fontSize: "0.85rem", padding: "0.25rem 0.5rem", marginTop: "0.25rem" }}
+                onClick={() => {
+                  setConfig((prev) => ({
+                    ...prev,
+                    openaiModels: [...prev.openaiModels, ""],
+                  }));
+                }}
+              >
+                + Add Model
+              </button>
+              <div className="hint">
+                Additional models appear in the OpenClaw model picker as <code>openai/&lt;model&gt;</code>.
               </div>
             </div>
           </>

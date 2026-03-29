@@ -12,6 +12,7 @@ import { isClusterReachable, currentContext, currentNamespace, resetKubeConfig }
 import { stopAllK8sPortForwards } from "./services/k8s-port-forward.js";
 import { detectGcpDefaults } from "./services/gcp.js";
 import { fetchModelEndpointCatalog } from "./services/model-endpoint.js";
+import { fetchAnthropicModels, fetchOpenaiModels } from "./services/model-discovery.js";
 import { readdir, readFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { installerDataDir } from "./paths.js";
@@ -202,6 +203,34 @@ app.post("/api/configs/model-endpoint-models", async (req, res) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     res.status(502).json({ error: message });
+  }
+});
+
+app.post("/api/configs/anthropic-models", async (req, res) => {
+  const apiKey = (req.body as { apiKey?: string }).apiKey?.trim() || process.env.ANTHROPIC_API_KEY || "";
+  if (!apiKey) {
+    res.status(400).json({ error: "API key is required" });
+    return;
+  }
+  try {
+    const models = await fetchAnthropicModels(apiKey);
+    res.json({ models });
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : "Failed to fetch Anthropic models" });
+  }
+});
+
+app.post("/api/configs/openai-models", async (req, res) => {
+  const apiKey = (req.body as { apiKey?: string }).apiKey?.trim() || process.env.OPENAI_API_KEY || "";
+  if (!apiKey) {
+    res.status(400).json({ error: "API key is required" });
+    return;
+  }
+  try {
+    const models = await fetchOpenaiModels(apiKey);
+    res.json({ models });
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : "Failed to fetch OpenAI models" });
   }
 });
 

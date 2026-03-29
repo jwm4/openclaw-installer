@@ -60,6 +60,8 @@ export interface DeployConfig {
   openaiApiKey?: string;
   anthropicModel?: string;
   openaiModel?: string;
+  anthropicModels?: string[];
+  openaiModels?: string[];
   inferenceProvider?: InferenceProvider;
   agentModel?: string;
   modelFallbacks?: string[];

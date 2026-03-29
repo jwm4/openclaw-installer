@@ -129,6 +129,18 @@ export function buildConfiguredAgentModelCatalog(
     }
     catalog[modelRef] = { alias: alias || modelRef.split("/").pop() || modelRef };
   }
+  for (const modelId of config.anthropicModels || []) {
+    const trimmed = modelId.trim();
+    if (!trimmed) continue;
+    const ref = trimmed.includes("/") ? trimmed : `anthropic/${trimmed}`;
+    catalog[ref] = { alias: trimmed };
+  }
+  for (const modelId of config.openaiModels || []) {
+    const trimmed = modelId.trim();
+    if (!trimmed) continue;
+    const ref = trimmed.includes("/") ? trimmed : `openai/${trimmed}`;
+    catalog[ref] = { alias: trimmed };
+  }
   for (const option of config.modelEndpointModels || []) {
     const id = String(option.id || "").trim();
     if (!id) {
