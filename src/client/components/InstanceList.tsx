@@ -107,6 +107,7 @@ export default function InstanceList({ active }: { active: boolean }) {
   const [acting, setActing] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<string, ExpandedPanel>>({});
   const [panelData, setPanelData] = useState<Record<string, string>>({});
+  const [pairingMessages, setPairingMessages] = useState<Record<string, { tone: "success" | "warning" | "error"; text: string }>>({});
 
   const fetchInstances = async () => {
     try {
@@ -179,7 +180,48 @@ export default function InstanceList({ active }: { active: boolean }) {
 
   const handleApproveDevice = async (id: string) => {
     setActing(id);
-    await fetch(`/api/instances/${id}/approve-device`, { method: "POST" });
+    setPairingMessages((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    try {
+      const res = await fetch(`/api/instances/${id}/approve-device`, { method: "POST" });
+      const data = await res.json();
+      if (res.ok && data.status === "noop") {
+        setPairingMessages((prev) => ({
+          ...prev,
+          [id]: {
+            tone: "warning",
+            text: data.error || "No pending device pairing requests.",
+          },
+        }));
+      } else if (res.ok) {
+        setPairingMessages((prev) => ({
+          ...prev,
+          [id]: {
+            tone: "success",
+            text: "Approved the latest pending pairing request.",
+          },
+        }));
+      } else {
+        setPairingMessages((prev) => ({
+          ...prev,
+          [id]: {
+            tone: "error",
+            text: data.error || `Failed to approve pairing (${res.status})`,
+          },
+        }));
+      }
+    } catch (err) {
+      setPairingMessages((prev) => ({
+        ...prev,
+        [id]: {
+          tone: "error",
+          text: err instanceof Error ? err.message : "Failed to approve pairing",
+        },
+      }));
+    }
     await fetchInstances();
     setActing(null);
   };
@@ -282,10 +324,26 @@ export default function InstanceList({ active }: { active: boolean }) {
 
   return (
     <div className="card" style={{ padding: 0 }}>
+      <div
+        style={{
+          padding: "0.75rem 1rem",
+          borderBottom: "1px solid var(--border)",
+          background: "rgba(243, 156, 18, 0.08)",
+          color: "var(--text-secondary)",
+          fontSize: "0.9rem",
+        }}
+      >
+        Browser access may require a one-time device pairing. If the Control UI asks to pair, use
+        {" "}
+        <strong>Approve Pairing</strong>
+        {" "}
+        on the running instance.
+      </div>
       {instances.map((inst) => {
         const isActing = acting === inst.id;
         const activePanel = expanded[inst.id];
         const panelContent = panelData[`${inst.id}-${activePanel}`];
+        const pairingMessage = pairingMessages[inst.id];
         const isRunning = inst.status === "running";
         const isStopped = inst.status === "stopped";
         const isDeploying = inst.status === "deploying";
@@ -342,16 +400,14 @@ export default function InstanceList({ active }: { active: boolean }) {
               <div className="instance-actions">
                 {isRunning && (
                   <>
-                    {!isK8s && (
-                      <button
-                        className="btn btn-ghost"
-                        disabled={isActing}
-                        onClick={() => handleApproveDevice(inst.id)}
-                        title="Approve the latest pending browser device pairing request"
-                      >
-                        Approve Pairing
-                      </button>
-                    )}
+                    <button
+                      className="btn btn-ghost"
+                      disabled={isActing}
+                      onClick={() => handleApproveDevice(inst.id)}
+                      title="Approve the latest pending browser device pairing request"
+                    >
+                      Approve Pairing
+                    </button>
                     <button
                       className="btn btn-ghost"
                       onClick={() => togglePanel(inst.id, "connection")}
@@ -418,6 +474,23 @@ export default function InstanceList({ active }: { active: boolean }) {
                 </button>
               </div>
             </div>
+            {pairingMessage && (
+              <div
+                style={{
+                  padding: "0.5rem 1rem",
+                  borderTop: "1px solid var(--border)",
+                  color:
+                    pairingMessage.tone === "success"
+                      ? "#1f7a3d"
+                      : pairingMessage.tone === "warning"
+                        ? "#9a6700"
+                        : "#e74c3c",
+                  fontSize: "0.85rem",
+                }}
+              >
+                {pairingMessage.text}
+              </div>
+            )}
             <K8sProgress inst={inst} />
             {activePanel === "connection" && panelContent && inst.url && (
               <div

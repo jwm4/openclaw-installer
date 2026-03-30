@@ -1,6 +1,10 @@
 # Using OpenClaw Commands With Local Installer Instances
 
-For installer-managed local instances, the most reliable workflow is to run the upstream `openclaw` CLI inside the running container with `podman exec` or `docker exec`.
+For installer-managed local instances, the simplest way to approve first-connect browser pairing is now the **Approve Pairing** button in the **Instances** tab.
+
+This page documents the CLI workflows for cases where you want or need to run the upstream `openclaw` commands manually.
+
+For installer-managed local instances, the most reliable CLI workflow is to run the upstream `openclaw` command inside the running container with `podman exec` or `docker exec`.
 
 Use the host-installed CLI only if you already have it available locally.
 
@@ -22,7 +26,7 @@ docker exec -it openclaw-myuser-myagent openclaw status --deep
 docker exec -it openclaw-myuser-myagent openclaw sandbox explain
 ```
 
-This is also the workflow to approve first-connect browser device pairing for the Control UI:
+If you want to approve first-connect browser device pairing manually instead of using the **Instances** tab button:
 
 ```bash
 podman exec -it openclaw-myuser-myagent openclaw devices list
@@ -64,6 +68,14 @@ openclaw devices approve <requestId>
 ```
 
 Because `OPENCLAW_CONTAINER` is set either way, the host CLI will target the running local containerized instance directly.
+
+That same host CLI workflow can also be used for manual browser pairing approval:
+
+```bash
+source ~/.openclaw/installer/local/openclaw-myuser-myagent/.env
+openclaw devices list
+openclaw devices approve <requestId>
+```
 
 ## Switching Between Local Instances
 

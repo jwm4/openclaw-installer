@@ -53,14 +53,16 @@ The installer pulls the image, provisions your agent with a default identity and
 For installer-managed local containerized installs, the Control UI opens with the saved gateway token.
 Browser device pairing remains enabled by default, so the first browser connect may still require the normal pairing/approval flow.
 
-If the browser prompts for pairing approval, approve the pending device request from the running container. With podman:
+If the browser prompts for pairing approval, go to the **Instances** tab and click **Approve Pairing** on the running instance.
+
+If you prefer to do it manually from the container instead, with podman:
 
 ```bash
 podman exec -it openclaw-<prefix>-<name> openclaw devices list
 podman exec -it openclaw-<prefix>-<name> openclaw devices approve <requestId>
 ```
 
-With docker:
+Or with docker:
 
 ```bash
 docker exec -it openclaw-<prefix>-<name> openclaw devices list

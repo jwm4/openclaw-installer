@@ -51,7 +51,7 @@ The installer will:
 - fetch the gateway token
 - open the UI with the saved gateway token
 
-Control UI device pairing remains enabled by default for the base Kubernetes deployer, so first browser connect may still require the normal pairing/approval flow.
+Control UI device pairing remains enabled by default for the base Kubernetes deployer, so first browser connect may require approving the pending pairing request from the **Instances** tab with **Approve Pairing**.
 
 Manual access is still available if you prefer:
 
