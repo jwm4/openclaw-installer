@@ -62,6 +62,9 @@ For local deploys, the installer now follows the upstream OpenClaw secret model 
 
 This means the container still receives the credentials it needs, but `openclaw.json` does not embed the plaintext API keys or Telegram bot token.
 
+For credentials like GitHub PATs, API keys, and bot tokens, see [podman-secrets.md](podman-secrets.md)
+for current options including Podman secrets, 1Password, and HashiCorp Vault.
+
 ## Using The OpenClaw CLI
 
 Installer-managed local instances save `OPENCLAW_CONTAINER` in their instance `.env`, so the upstream OpenClaw CLI can target the running local container directly.
