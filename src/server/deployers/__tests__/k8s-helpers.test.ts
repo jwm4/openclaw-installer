@@ -146,6 +146,9 @@ describe("model config generation", () => {
 
     const rendered = buildOpenClawConfig(config, "gateway-token") as {
       agents?: {
+        defaults?: {
+          models?: Record<string, { alias?: string }>;
+        };
         list?: Array<{
           model?: { primary?: string; fallbacks?: string[] };
         }>;
@@ -155,6 +158,9 @@ describe("model config generation", () => {
     expect(rendered.agents?.list?.[0]?.model).toEqual({
       primary: "anthropic/claude-sonnet-4-6",
       fallbacks: ["endpoint/google/gemma-4-26B-A4B-it"],
+    });
+    expect(rendered.agents?.defaults?.models).toMatchObject({
+      "endpoint/google/gemma-4-26B-A4B-it": { alias: "gemma-4-26B-A4B-it" },
     });
 
     rmSync(dir, { recursive: true, force: true });
@@ -763,9 +769,9 @@ describe("detectUnavailableProvider", () => {
     expect(detectUnavailableProvider("anthropic-vertex/claude-sonnet-4-6", config)).toBe(false);
   });
 
-  it("returns false for unknown provider prefixes", () => {
+  it("returns false for unknown provider prefixes and detects missing litellm", () => {
     const config = makeConfig({});
-    expect(detectUnavailableProvider("litellm/my-model", config)).toBe(false);
+    expect(detectUnavailableProvider("litellm/my-model", config)).toBe(true);
     expect(detectUnavailableProvider("custom/model", config)).toBe(false);
   });
 });

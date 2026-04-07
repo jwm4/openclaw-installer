@@ -6,6 +6,7 @@ import { shouldUseOtel, OTEL_HTTP_PORT } from "./otel.js";
 import { buildSandboxConfig } from "./sandbox.js";
 import { buildSandboxToolPolicy } from "./tool-policy.js";
 import { loadAgentSourceBundle, loadAgentSourceMcpServers } from "./agent-source.js";
+import type { AgentSourceBundle } from "./agent-source.js";
 import { normalizeManagedVaultProviders } from "./vault-helper.js";
 
 export const DEFAULT_IMAGE = process.env.OPENCLAW_IMAGE || "ghcr.io/openclaw/openclaw:latest";
@@ -108,6 +109,7 @@ function normalizeProviderModelRef(provider: string, modelRef?: string): string 
 export function buildConfiguredAgentModelCatalog(
   config: DeployConfig,
   primaryModelRef: string,
+  sourceBundle?: AgentSourceBundle,
 ): Record<string, { alias: string }> {
   const catalog = buildDefaultAgentModelCatalog(primaryModelRef);
   const configuredModels = [
@@ -169,6 +171,31 @@ export function buildConfiguredAgentModelCatalog(
     if (!trimmed) continue;
     const ref = shouldUseLitellmProxy(config) ? `litellm/${trimmed}` : `google-vertex/${trimmed}`;
     catalog[ref] = { alias: trimmed };
+  }
+  const bundleModelRefs = new Set<string>();
+  const collectModelRefs = (model?: { primary?: string; fallbacks?: string[] }) => {
+    const primary = model?.primary?.trim();
+    if (primary) {
+      bundleModelRefs.add(primary);
+    }
+    for (const fallback of model?.fallbacks || []) {
+      const trimmed = fallback.trim();
+      if (trimmed) {
+        bundleModelRefs.add(trimmed);
+      }
+    }
+  };
+  collectModelRefs(sourceBundle?.mainAgent?.model);
+  for (const entry of sourceBundle?.agents || []) {
+    collectModelRefs(entry.model);
+  }
+  for (const modelRef of bundleModelRefs) {
+    if (detectUnavailableProvider(modelRef, config)) {
+      continue;
+    }
+    if (!(modelRef in catalog)) {
+      catalog[modelRef] = { alias: modelRef.split("/").pop() || modelRef };
+    }
   }
   return catalog;
 }
@@ -290,6 +317,10 @@ export function detectUnavailableProvider(
     case "google-vertex":
       return !config.vertexEnabled
         || (config.vertexProvider !== "google" && config.inferenceProvider !== "vertex-google");
+    case "endpoint":
+      return !config.modelEndpoint?.trim();
+    case "litellm":
+      return !shouldUseLitellmProxy(config);
     default:
       return false;
   }
@@ -510,7 +541,7 @@ export function buildOpenClawConfig(config: DeployConfig, gatewayToken: string):
       defaults: {
         workspace: "~/.openclaw/workspace",
         model: buildAgentModelConfig(config, model),
-        models: buildConfiguredAgentModelCatalog(config, model),
+        models: buildConfiguredAgentModelCatalog(config, model, sourceBundle),
         ...(buildSandboxConfig(config) ? { sandbox: buildSandboxConfig(config) } : {}),
       },
       list: [

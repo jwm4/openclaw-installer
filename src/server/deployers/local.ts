@@ -492,7 +492,7 @@ function buildOpenClawConfig(config: DeployConfig, gatewayToken: string): string
       defaults: {
         workspace: "~/.openclaw/workspace",
         model: buildAgentModelConfig(config, model),
-        models: buildConfiguredAgentModelCatalog(config, model),
+        models: buildConfiguredAgentModelCatalog(config, model, sourceBundle),
         ...(buildSandboxConfig(config) ? { sandbox: buildSandboxConfig(config) } : {}),
       },
       list: [
