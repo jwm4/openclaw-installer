@@ -40,6 +40,27 @@ type ApproveDeviceResult =
 
 const AUTO_APPROVE_ATTEMPTS = 15;
 const AUTO_APPROVE_INTERVAL_MS = 1000;
+const AUTO_APPROVE_STORAGE_KEY = "openclaw:auto-approve-attempted";
+
+function loadAutoApproveAttempted(): Record<string, string> {
+  try {
+    const raw = window.localStorage.getItem(AUTO_APPROVE_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string",
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
 
 function defaultSessionKey(inst: Instance): string {
   const prefix = inst.config.prefix?.trim() || "openclaw";
@@ -135,6 +156,7 @@ export default function InstanceList({ active }: { active: boolean }) {
   const [expanded, setExpanded] = useState<Record<string, ExpandedPanel>>({});
   const [panelData, setPanelData] = useState<Record<string, string>>({});
   const [pairingMessages, setPairingMessages] = useState<Record<string, PairingMessage>>({});
+  const [autoApproveAttempted, setAutoApproveAttempted] = useState<Record<string, string>>(loadAutoApproveAttempted);
 
   const clearPairingMessage = (id: string) => {
     setPairingMessages((prev) => {
@@ -177,6 +199,28 @@ export default function InstanceList({ active }: { active: boolean }) {
         }
         return next;
       });
+      setAutoApproveAttempted((prev) => {
+        const next: Record<string, string> = {};
+        if (!Array.isArray(data)) {
+          return next;
+        }
+        for (const inst of data) {
+          if (
+            typeof inst === "object" &&
+            inst !== null &&
+            "id" in inst &&
+            "status" in inst &&
+            typeof (inst as Instance).id === "string" &&
+            (inst as Instance).status === "running"
+          ) {
+            const id = (inst as Instance).id;
+            if (prev[id]) {
+              next[id] = prev[id];
+            }
+          }
+        }
+        return next;
+      });
       setError(null);
     } catch (err) {
       setInstances([]);
@@ -204,6 +248,14 @@ export default function InstanceList({ active }: { active: boolean }) {
     return () => clearInterval(interval);
   }, [k8sAvailable]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(AUTO_APPROVE_STORAGE_KEY, JSON.stringify(autoApproveAttempted));
+    } catch {
+      // Ignore localStorage access failures.
+    }
+  }, [autoApproveAttempted]);
+
   // Fix for #5: fetch immediately when the Instances tab becomes visible
   useEffect(() => {
     if (active) {
@@ -222,6 +274,11 @@ export default function InstanceList({ active }: { active: boolean }) {
   const handleStop = async (id: string) => {
     setActing(id);
     clearPairingMessage(id);
+    setAutoApproveAttempted((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     await fetch(`/api/instances/${id}/stop`, { method: "POST" });
     setExpanded((prev) => {
       const next = { ...prev };
@@ -235,6 +292,11 @@ export default function InstanceList({ active }: { active: boolean }) {
   const handleRedeploy = async (id: string) => {
     setActing(id);
     clearPairingMessage(id);
+    setAutoApproveAttempted((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     await fetch(`/api/instances/${id}/redeploy`, { method: "POST" });
     await fetchInstances();
     setActing(null);
@@ -346,6 +408,7 @@ export default function InstanceList({ active }: { active: boolean }) {
 
   const handleOpenWithToken = async (inst: Instance) => {
     const targetUrl = inst.url ? `${inst.url}?session=${encodeURIComponent(defaultSessionKey(inst))}` : inst.url;
+    const alreadyAutoApproveAttempted = Boolean(autoApproveAttempted[inst.id]);
     clearPairingMessage(inst.id);
     try {
       const res = await fetch(`/api/instances/${inst.id}/token`);
@@ -358,7 +421,15 @@ export default function InstanceList({ active }: { active: boolean }) {
       window.open(targetUrl, "_blank", "noopener");
     }
 
+    if (alreadyAutoApproveAttempted) {
+      return;
+    }
+
     setActing(inst.id);
+    setAutoApproveAttempted((prev) => ({
+      ...prev,
+      [inst.id]: inst.startedAt || "__attempted__",
+    }));
     setPairingMessage(inst.id, {
       tone: "info",
       text: "Opened the gateway and waiting for the browser pairing request...",
@@ -439,7 +510,7 @@ export default function InstanceList({ active }: { active: boolean }) {
           fontSize: "0.9rem",
         }}
       >
-        Browser access may require a one-time device pairing. Opening the gateway will try to auto-approve it. If the request is still pending, use
+        Browser access may require a one-time device pairing. Opening the gateway will try to auto-approve it once per running instance. If the request is still pending, use
         {" "}
         <strong>Approve Pairing</strong>
         {" "}

@@ -3,6 +3,8 @@ import { render, screen, waitFor, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import InstanceList from "../InstanceList";
 
+const AUTO_APPROVE_STORAGE_KEY = "openclaw:auto-approve-attempted";
+
 const runningInstance = {
   id: "inst-1",
   mode: "local",
@@ -65,10 +67,12 @@ function mockFetchWith(instances: unknown[]) {
 beforeEach(() => {
   vi.restoreAllMocks();
   vi.useFakeTimers({ shouldAdvanceTime: true });
+  window.localStorage.removeItem(AUTO_APPROVE_STORAGE_KEY);
 });
 
 afterEach(() => {
   cleanup();
+  window.localStorage.removeItem(AUTO_APPROVE_STORAGE_KEY);
   vi.useRealTimers();
 });
 
@@ -403,6 +407,148 @@ describe("InstanceList", () => {
     await waitFor(() => {
       expect(screen.getByText(/opened the gateway and approved the pending pairing request/i)).toBeInTheDocument();
     });
+  });
+
+  it("only auto-approves once per running instance lifecycle", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+
+    let approveCalls = 0;
+    globalThis.fetch = vi.fn((url: string, opts?: RequestInit) => {
+      if (url === "/api/health") {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ k8sAvailable: false }) });
+      }
+      if ((url === "/api/instances" || url === "/api/instances?includeK8s=1") && !opts?.method) {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([runningInstance]) });
+      }
+      if (url === "/api/instances/inst-1/token") {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ token: "my-token" }) });
+      }
+      if (url === "/api/instances/inst-1/approve-device") {
+        approveCalls += 1;
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "approved" }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    }) as unknown as typeof globalThis.fetch;
+
+    render(<InstanceList active />);
+    await waitFor(() => {
+      expect(screen.getByText("http://localhost:18789")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("http://localhost:18789"));
+    await waitFor(() => {
+      expect(screen.getByText(/opened the gateway and approved the pending pairing request/i)).toBeInTheDocument();
+    });
+    expect(approveCalls).toBe(1);
+
+    await user.click(screen.getByText("http://localhost:18789"));
+    await waitFor(() => {
+      expect(openSpy).toHaveBeenCalledTimes(2);
+    });
+    expect(approveCalls).toBe(1);
+  });
+
+  it("does not auto-approve again after the installer UI reloads for the same running instance", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+
+    let approveCalls = 0;
+    globalThis.fetch = vi.fn((url: string, opts?: RequestInit) => {
+      if (url === "/api/health") {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ k8sAvailable: false }) });
+      }
+      if ((url === "/api/instances" || url === "/api/instances?includeK8s=1") && !opts?.method) {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([runningInstance]) });
+      }
+      if (url === "/api/instances/inst-1/token") {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ token: "my-token" }) });
+      }
+      if (url === "/api/instances/inst-1/approve-device") {
+        approveCalls += 1;
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "approved" }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    }) as unknown as typeof globalThis.fetch;
+
+    const firstRender = render(<InstanceList active />);
+    await waitFor(() => {
+      expect(screen.getByText("http://localhost:18789")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("http://localhost:18789"));
+    await waitFor(() => {
+      expect(screen.getByText(/opened the gateway and approved the pending pairing request/i)).toBeInTheDocument();
+    });
+    expect(approveCalls).toBe(1);
+
+    firstRender.unmount();
+
+    render(<InstanceList active />);
+    await waitFor(() => {
+      expect(screen.getByText("http://localhost:18789")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("http://localhost:18789"));
+    await waitFor(() => {
+      expect(openSpy).toHaveBeenCalledTimes(2);
+    });
+    expect(approveCalls).toBe(1);
+  });
+
+  it("does not auto-approve again when the same running instance is rediscovered with a different startedAt", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+
+    let approveCalls = 0;
+    let currentInstance = runningInstance;
+    globalThis.fetch = vi.fn((url: string, opts?: RequestInit) => {
+      if (url === "/api/health") {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ k8sAvailable: false }) });
+      }
+      if ((url === "/api/instances" || url === "/api/instances?includeK8s=1") && !opts?.method) {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([currentInstance]) });
+      }
+      if (url === "/api/instances/inst-1/token") {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ token: "my-token" }) });
+      }
+      if (url === "/api/instances/inst-1/approve-device") {
+        approveCalls += 1;
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "approved" }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    }) as unknown as typeof globalThis.fetch;
+
+    const firstRender = render(<InstanceList active />);
+    await waitFor(() => {
+      expect(screen.getByText("http://localhost:18789")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("http://localhost:18789"));
+    await waitFor(() => {
+      expect(screen.getByText(/opened the gateway and approved the pending pairing request/i)).toBeInTheDocument();
+    });
+    expect(approveCalls).toBe(1);
+
+    currentInstance = {
+      ...runningInstance,
+      startedAt: "2025-01-01T00:05:00Z",
+    };
+    firstRender.unmount();
+
+    render(<InstanceList active />);
+    await waitFor(() => {
+      expect(screen.getByText("http://localhost:18789")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("http://localhost:18789"));
+    await waitFor(() => {
+      expect(openSpy).toHaveBeenCalledTimes(2);
+    });
+    expect(approveCalls).toBe(1);
   });
 
   it("opens cluster URLs with the saved gateway token", async () => {
