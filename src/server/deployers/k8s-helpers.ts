@@ -10,6 +10,13 @@ import { loadAgentSourceBundle, loadAgentSourceMcpServers } from "./agent-source
 import type { AgentSourceBundle } from "./agent-source.js";
 import { normalizeManagedVaultProviders } from "./vault-helper.js";
 import { hasPodmanSecretTarget } from "../../shared/podman-secrets.js";
+import {
+  OPENAI_CODEX_PROVIDER,
+  attachCodexOauthConfig,
+  codexModelIdFromRef,
+  codexOauthAuthProfileStoreJson,
+  normalizeCodexModelRef,
+} from "./codex-oauth.js";
 
 export const DEFAULT_IMAGE = process.env.OPENCLAW_IMAGE || "ghcr.io/openclaw/openclaw:latest";
 export const DEFAULT_VERTEX_IMAGE = process.env.OPENCLAW_VERTEX_IMAGE || DEFAULT_IMAGE;
@@ -85,6 +92,9 @@ export function normalizeModelRef(config: DeployConfig, modelRef: string): strin
   if (config.inferenceProvider === "openai") {
     return `openai/${trimmed}`;
   }
+  if (config.inferenceProvider === OPENAI_CODEX_PROVIDER) {
+    return normalizeCodexModelRef(trimmed);
+  }
   if (config.inferenceProvider === GOOGLE_PROVIDER) {
     return `${GOOGLE_PROVIDER}/${trimmed}`;
   }
@@ -154,6 +164,13 @@ export function buildConfiguredAgentModelCatalog(
     },
     {
       ref: normalizeProviderModelRef(
+        OPENAI_CODEX_PROVIDER,
+        config.codexModel || (config.inferenceProvider === OPENAI_CODEX_PROVIDER ? "gpt-5.4" : undefined),
+      ),
+      alias: codexModelIdFromRef(config.codexModel || "gpt-5.4"),
+    },
+    {
+      ref: normalizeProviderModelRef(
         GOOGLE_PROVIDER,
         config.googleModel
           || ((config.googleApiKey || config.googleApiKeyRef || hasLocalProviderSecret(config, "GEMINI_API_KEY") || hasLocalProviderSecret(config, "GOOGLE_API_KEY"))
@@ -195,6 +212,12 @@ export function buildConfiguredAgentModelCatalog(
     if (!trimmed) continue;
     const ref = trimmed.includes("/") ? trimmed : `openai/${trimmed}`;
     catalog[ref] = { alias: trimmed };
+  }
+  for (const modelId of config.codexModels || []) {
+    const trimmed = modelId.trim();
+    if (!trimmed) continue;
+    const ref = normalizeCodexModelRef(trimmed);
+    catalog[ref] = { alias: codexModelIdFromRef(trimmed) };
   }
   for (const modelId of config.googleModels || []) {
     const trimmed = modelId.trim();
@@ -279,6 +302,9 @@ export function deriveModel(config: DeployConfig): string {
   if (config.inferenceProvider === "openai") {
     return `openai/${config.openaiModel?.trim() || "gpt-5.4"}`;
   }
+  if (config.inferenceProvider === OPENAI_CODEX_PROVIDER) {
+    return normalizeCodexModelRef(config.codexModel);
+  }
   if (config.inferenceProvider === GOOGLE_PROVIDER) {
     return `${GOOGLE_PROVIDER}/${config.googleModel?.trim() || "gemini-3.1-pro-preview"}`;
   }
@@ -302,6 +328,7 @@ export function deriveModel(config: DeployConfig): string {
       : "google-vertex/gemini-2.5-pro";
   }
   if (config.openaiApiKey || config.openaiApiKeyRef) return "openai/gpt-5.4";
+  if (config.codexOauthAuthJson || config.codexOauthProfileId) return normalizeCodexModelRef(config.codexModel);
   if (config.googleApiKey || config.googleApiKeyRef) return `${GOOGLE_PROVIDER}/gemini-3.1-pro-preview`;
   if (config.openrouterApiKey || config.openrouterApiKeyRef) return `${OPENROUTER_PROVIDER}/auto`;
   if (config.modelEndpoint) {
@@ -376,6 +403,10 @@ export function detectUnavailableProvider(
     case "openai":
       return !config.openaiApiKey && !config.openaiApiKeyRef
         && config.inferenceProvider !== "openai";
+    case OPENAI_CODEX_PROVIDER:
+      return config.inferenceProvider !== OPENAI_CODEX_PROVIDER
+        && !config.codexOauthAuthJson
+        && !config.codexOauthProfileId;
     case GOOGLE_PROVIDER:
       return !config.googleApiKey && !config.googleApiKeyRef
         && config.inferenceProvider !== GOOGLE_PROVIDER;
@@ -510,6 +541,11 @@ export function buildManagedAgentAuthProfiles(config: DeployConfig): {
         profiles,
       }
     : undefined;
+}
+
+export function buildManagedAgentAuthProfilesSecretJson(config: DeployConfig): string | undefined {
+  const baseProfiles = buildManagedAgentAuthProfiles(config)?.profiles || {};
+  return codexOauthAuthProfileStoreJson(config, baseProfiles);
 }
 
 function attachSecretHandlingConfig(ocConfig: Record<string, unknown>, config: DeployConfig): void {
@@ -785,6 +821,7 @@ export function buildOpenClawConfig(config: DeployConfig, gatewayToken: string):
     ocConfig.mcp = { servers: mcpServers };
   }
 
+  attachCodexOauthConfig(ocConfig, config);
   attachSecretHandlingConfig(ocConfig, config);
 
   return ocConfig;

@@ -1,7 +1,8 @@
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { v4 as uuid } from "uuid";
 import type {
@@ -51,6 +52,13 @@ import {
   resolveSubagentModel,
   usesDefaultEnvSecretRef,
 } from "./k8s-helpers.js";
+import {
+  OPENAI_CODEX_PROVIDER,
+  attachCodexOauthConfig,
+  buildCodexOauthCredentialFromCliAuthJson,
+  codexOauthAuthProfileStoreJson,
+  normalizeCodexModelRef,
+} from "./codex-oauth.js";
 import { buildSandboxConfig } from "./sandbox.js";
 import { buildSandboxToolPolicy } from "./tool-policy.js";
 import { loadAgentSourceBundle, loadAgentSourceMcpServers, mainWorkspaceShellCondition } from "./agent-source.js";
@@ -70,6 +78,7 @@ const SANDBOX_SSH_DIR = "/home/node/.openclaw/sandbox-ssh";
 const SANDBOX_SSH_IDENTITY_CONTAINER_PATH = `${SANDBOX_SSH_DIR}/identity`;
 const SANDBOX_SSH_CERTIFICATE_CONTAINER_PATH = `${SANDBOX_SSH_DIR}/certificate.pub`;
 const SANDBOX_SSH_KNOWN_HOSTS_CONTAINER_PATH = `${SANDBOX_SSH_DIR}/known_hosts`;
+const AUTH_PROFILE_IMPORT_CONTAINER_PATH = "/tmp/openclaw-auth-profiles/auth-profiles.json";
 
 /** Returns true if the image tag is `:latest` or absent — mutable tags that should always be pulled. */
 export function shouldAlwaysPull(image: string): boolean {
@@ -229,6 +238,15 @@ export function buildSavedInstanceEnvContent(config: DeployConfig, name: string)
   if (config.openaiApiKey && (!config.openaiApiKeyRef || usesDefaultEnvSecretRef(config.openaiApiKeyRef))) {
     lines.push(`OPENAI_API_KEY=${config.openaiApiKey}`);
   }
+  if (config.codexOauthMode) {
+    lines.push(`CODEX_OAUTH_MODE=${config.codexOauthMode}`);
+  }
+  if (config.codexOauthProfileId) {
+    lines.push(`CODEX_OAUTH_PROFILE_ID=${config.codexOauthProfileId}`);
+  }
+  if (config.codexOauthAuthJsonPath) {
+    lines.push(`CODEX_OAUTH_AUTH_JSON_PATH=${config.codexOauthAuthJsonPath}`);
+  }
   if (config.googleApiKey && (!config.googleApiKeyRef || usesDefaultEnvSecretRef(config.googleApiKeyRef))) {
     lines.push(`GEMINI_API_KEY=${config.googleApiKey}`);
   }
@@ -240,6 +258,12 @@ export function buildSavedInstanceEnvContent(config: DeployConfig, name: string)
   }
   if (config.openaiModel) {
     lines.push(`OPENAI_MODEL=${config.openaiModel}`);
+  }
+  if (config.codexModel) {
+    lines.push(`CODEX_MODEL=${config.codexModel}`);
+  }
+  if (config.codexModels && config.codexModels.length > 0) {
+    lines.push(`CODEX_MODELS_B64=${encodeEnvValue(JSON.stringify(config.codexModels))}`);
   }
   if (config.googleModel) {
     lines.push(`GOOGLE_MODEL=${config.googleModel}`);
@@ -420,6 +444,104 @@ function prepareLocalSandboxSshConfig(config: DeployConfig): {
   return { effectiveConfig };
 }
 
+function prepareLocalCodexOauthConfig(config: DeployConfig): DeployConfig {
+  if (
+    config.inferenceProvider !== OPENAI_CODEX_PROVIDER
+    || config.codexOauthMode === "profile"
+    || config.codexOauthAuthJson?.trim()
+  ) {
+    return config;
+  }
+
+  const authPath = normalizeHostPath(config.codexOauthAuthJsonPath)
+    || join(homedir(), ".codex", "auth.json");
+  if (!existsSync(authPath)) {
+    throw new Error(`Codex OAuth auth.json file not found: ${authPath}`);
+  }
+
+  const authJson = readFileSync(authPath, "utf8");
+  buildCodexOauthCredentialFromCliAuthJson(authJson);
+  return {
+    ...config,
+    codexOauthAuthJsonPath: authPath,
+    codexOauthAuthJson: authJson,
+  };
+}
+
+async function importLocalCodexAuthProfiles(params: {
+  runtime: ContainerRuntime;
+  config: DeployConfig;
+  image: string;
+  agentIds: string[];
+  log: LogCallback;
+}): Promise<void> {
+  const authProfilesJson = codexOauthAuthProfileStoreJson(params.config);
+  if (!authProfilesJson) {
+    return;
+  }
+
+  const authProfileImportLines = (sourcePath: string) =>
+    Array.from(new Set(params.agentIds))
+      .map((agentId) =>
+        `if [ -f '${sourcePath}' ]; then mkdir -p /home/node/.openclaw/agents/${agentId}/agent && cp '${sourcePath}' /home/node/.openclaw/agents/${agentId}/agent/auth-profiles.json && chmod 600 /home/node/.openclaw/agents/${agentId}/agent/auth-profiles.json; fi`
+      )
+      .join("\n");
+
+  if (params.runtime === "podman") {
+    const secretName = `openclaw-codex-auth-${uuid()}`;
+    const secretPath = `/run/secrets/${secretName}`;
+    const authProfileImportDir = join(tmpdir(), `openclaw-auth-profiles-${uuid()}`);
+    const authProfileImportPath = join(authProfileImportDir, "auth-profiles.json");
+    await mkdir(authProfileImportDir, { recursive: true });
+    await writeFile(authProfileImportPath, authProfilesJson, { mode: 0o600 });
+    try {
+      await execFileAsync("podman", ["secret", "create", secretName, authProfileImportPath]);
+      params.log("Importing Codex OAuth profile into local OpenClaw state via Podman secret");
+      const result = await runCommand(params.runtime, [
+        "run", "--rm",
+        ...localStateMountArgs(params.config),
+        "--secret", `${secretName},type=mount`,
+        params.image,
+        "sh", "-c", [
+          authProfileImportLines(secretPath),
+          runtimeOwnershipFixupCommand(),
+        ].join("\n"),
+      ], params.log);
+      if (result.code !== 0) {
+        throw new Error("Failed to import Codex OAuth profile into local runtime state");
+      }
+      return;
+    } finally {
+      await execFileAsync("podman", ["secret", "rm", secretName]).catch(() => undefined);
+      await rm(authProfileImportDir, { recursive: true, force: true });
+    }
+  }
+
+  const authProfileImportDir = join(tmpdir(), `openclaw-auth-profiles-${uuid()}`);
+  await mkdir(authProfileImportDir, { recursive: true });
+  await writeFile(join(authProfileImportDir, "auth-profiles.json"), authProfilesJson, { mode: 0o600 });
+
+  try {
+    params.log("Importing Codex OAuth profile into local OpenClaw state");
+    const result = await runCommand(params.runtime, [
+      "run", "--rm",
+      "--user", "0",
+      ...localStateMountArgs(params.config),
+      "-v", bindMountSpec(authProfileImportDir, "/tmp/openclaw-auth-profiles", "ro"),
+      params.image,
+      "sh", "-c", [
+        authProfileImportLines(AUTH_PROFILE_IMPORT_CONTAINER_PATH),
+        runtimeOwnershipFixupCommand(),
+      ].join("\n"),
+    ], params.log);
+    if (result.code !== 0) {
+      throw new Error("Failed to import Codex OAuth profile into local runtime state");
+    }
+  } finally {
+    await rm(authProfileImportDir, { recursive: true, force: true });
+  }
+}
+
 
 /**
  * Derive the model ID based on configured provider.
@@ -438,6 +560,9 @@ function deriveModel(config: DeployConfig): string {
   }
   if (config.inferenceProvider === "openai") {
     return `openai/${config.openaiModel?.trim() || "gpt-5.4"}`;
+  }
+  if (config.inferenceProvider === OPENAI_CODEX_PROVIDER) {
+    return normalizeCodexModelRef(config.codexModel);
   }
   if (config.inferenceProvider === GOOGLE_PROVIDER) {
     return `${GOOGLE_PROVIDER}/${config.googleModel?.trim() || "gemini-3.1-pro-preview"}`;
@@ -463,6 +588,9 @@ function deriveModel(config: DeployConfig): string {
   }
   if (config.openaiApiKey || config.openaiApiKeyRef) {
     return "openai/gpt-5.4";
+  }
+  if (config.codexOauthAuthJson || config.codexOauthProfileId) {
+    return normalizeCodexModelRef(config.codexModel);
   }
   if (config.googleApiKey || config.googleApiKeyRef) {
     return `${GOOGLE_PROVIDER}/gemini-3.1-pro-preview`;
@@ -923,6 +1051,7 @@ function buildOpenClawConfig(config: DeployConfig, gatewayToken: string): string
     ocConfig.mcp = { servers: mcpServers };
   }
 
+  attachCodexOauthConfig(ocConfig, config);
   attachSecretHandlingConfig(ocConfig, config);
 
   return JSON.stringify(ocConfig);
@@ -1279,8 +1408,9 @@ export class LocalDeployer implements Deployer {
     log("Initializing local state...");
 
     const localSandboxPrepared = prepareLocalSandboxSshConfig(config);
+    const localCodexPrepared = prepareLocalCodexOauthConfig(localSandboxPrepared.effectiveConfig);
     const activeConfig = await withActivePodmanSecretMappings(
-      localSandboxPrepared.effectiveConfig,
+      localCodexPrepared,
       runtime,
       log,
     );
@@ -1464,6 +1594,16 @@ Use this table to track verified peer OpenClaw instances.
     if (initResult.code !== 0) {
       throw new Error("Failed to initialize config volume");
     }
+    await importLocalCodexAuthProfiles({
+      runtime,
+      config: runtimeConfig,
+      image,
+      agentIds: [
+        agentId,
+        ...((sourceBundle?.agents || []).map((entry) => entry.id).filter(Boolean)),
+      ],
+      log,
+    });
     log(`Default agent provisioned: ${config.agentDisplayName || config.agentName} (${agentId})`);
 
     // Write GCP SA JSON into volume as a separate step (avoids heredoc/shell escaping issues)
@@ -1795,8 +1935,9 @@ Use this table to track verified peer OpenClaw instances.
     const runtime = result.config.containerRuntime ?? (await detectRuntime());
     if (!runtime) throw new Error("No container runtime found");
     const localSandboxPrepared = prepareLocalSandboxSshConfig(result.config);
+    const localCodexPrepared = prepareLocalCodexOauthConfig(localSandboxPrepared.effectiveConfig);
     const effectiveConfig = await withActivePodmanSecretMappings(
-      localSandboxPrepared.effectiveConfig,
+      localCodexPrepared,
       runtime,
       log,
     );
@@ -1833,6 +1974,18 @@ Use this table to track verified peer OpenClaw instances.
       throw new Error("Failed to initialize local runtime state");
     }
 
+    const sourceBundle = loadAgentSourceBundle(runtimeConfig);
+    await importLocalCodexAuthProfiles({
+      runtime,
+      config: runtimeConfig,
+      image,
+      agentIds: [
+        agentId,
+        ...((sourceBundle?.agents || []).map((entry) => entry.id).filter(Boolean)),
+      ],
+      log,
+    });
+
     if (effectiveConfig.gcpServiceAccountJson) {
       const b64 = Buffer.from(effectiveConfig.gcpServiceAccountJson).toString("base64");
       const gcpResult = await runCommand(runtime, [
@@ -1855,12 +2008,11 @@ Use this table to track verified peer OpenClaw instances.
     if (hasWorkspaceDirs) {
       log("Updating agent files from host...");
       const workspaceDir = `/home/node/.openclaw/workspace-${agentId}`;
-      const bundleForCopy = loadAgentSourceBundle(effectiveConfig);
       const copyScript = [
         `for d in /tmp/agent-source/workspace-*; do`,
         `  if [ -d "$d" ]; then`,
         `    base="$(basename "$d")"`,
-        `    ${mainWorkspaceShellCondition(workspaceDir, bundleForCopy)}`,
+        `    ${mainWorkspaceShellCondition(workspaceDir, sourceBundle)}`,
         `    mkdir -p "$dest"`,
         `    cp -r "$d"/* "$dest"/ 2>/dev/null || true`,
         `  fi`,

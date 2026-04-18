@@ -75,6 +75,12 @@ const CURATED_MODEL_OPTIONS: Partial<Record<InferenceProvider, Array<{ id: strin
     { id: "gpt-5.4", name: "GPT-5.4" },
     { id: "gpt-5-mini", name: "GPT-5 Mini" },
   ],
+  "openai-codex": [
+    { id: "gpt-5.4", name: "GPT-5.4 Codex" },
+    { id: "gpt-5.4-mini", name: "GPT-5.4 Mini" },
+    { id: "gpt-5.3-codex", name: "GPT-5.3 Codex" },
+    { id: "gpt-5.3-codex-spark", name: "GPT-5.3 Codex Spark" },
+  ],
   google: [
     { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview" },
     { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro" },
@@ -111,6 +117,10 @@ function applyProviderDefaultModel(
       return prev.anthropicModel.trim() ? prev : { ...prev, anthropicModel: MODEL_DEFAULTS.anthropic };
     case "openai":
       return prev.openaiModel.trim() ? prev : { ...prev, openaiModel: MODEL_DEFAULTS.openai.replace(/^openai\//, "") };
+    case "openai-codex":
+      return prev.codexModel.trim()
+        ? prev
+        : { ...prev, codexModel: MODEL_DEFAULTS["openai-codex"].replace(/^openai-codex\//, "") };
     case "google":
       return prev.googleModel.trim() ? prev : { ...prev, googleModel: MODEL_DEFAULTS.google.replace(/^google\//, "") };
     case "openrouter":
@@ -487,6 +497,140 @@ export function ProviderSection({
               </button>
               <div className="hint">
                 Additional models appear in the OpenClaw model picker as <code>openai/&lt;model&gt;</code>.
+              </div>
+            </div>
+          </>
+        );
+      }
+
+      case "openai-codex": {
+        const visibleCodexOptions = CURATED_MODEL_OPTIONS["openai-codex"] || [];
+        const additionalCodexOptions = visibleCodexOptions.filter(
+          (option) => option.id !== config.codexModel,
+        );
+        return (
+          <>
+            <div className="form-group">
+              <label>Codex CLI auth.json Path</label>
+              <input
+                type="text"
+                autoComplete="new-password"
+                data-1p-ignore="true"
+                data-lpignore="true"
+                placeholder="Leave blank for ~/.codex/auth.json"
+                spellCheck={false}
+                value={config.codexOauthAuthJsonPath}
+                onChange={(e) => update("codexOauthAuthJsonPath", e.target.value)}
+              />
+              <div className="hint">
+                The installer reads this file on the server host and imports the ChatGPT OAuth tokens into the managed OpenClaw state as <code>openai-codex:default</code>.
+              </div>
+            </div>
+            <div className="form-group">
+              <label>Codex Model</label>
+              {visibleCodexOptions.length > 0 && (
+                <select
+                  value={getModelSelectValue(config.codexModel, visibleCodexOptions)}
+                  onChange={(e) => {
+                    if (e.target.value === "__custom__") {
+                      if (visibleCodexOptions.some((option) => option.id === config.codexModel)) {
+                        update("codexModel", "");
+                      }
+                      return;
+                    }
+                    update("codexModel", e.target.value);
+                  }}
+                >
+                  <option value="">Select a model...</option>
+                  {visibleCodexOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {formatModelOptionLabel(option)}
+                    </option>
+                  ))}
+                  <option value="__custom__">
+                    {getCustomModelOptionLabel(config.codexModel, visibleCodexOptions)}
+                  </option>
+                </select>
+              )}
+              <input
+                type="text"
+                placeholder="e.g., gpt-5.4"
+                value={config.codexModel}
+                onChange={(e) => update("codexModel", e.target.value)}
+              />
+              <div className="hint">
+                The primary model is used as <code>openai-codex/&lt;model&gt;</code>.
+              </div>
+            </div>
+            <div className="form-group">
+              <label>Additional Codex Models</label>
+              {additionalCodexOptions.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", marginBottom: "0.5rem", maxHeight: "150px", overflowY: "auto", border: "1px solid var(--border)", borderRadius: "6px", padding: "0.5rem" }}>
+                  {additionalCodexOptions.map((option) => (
+                    <label key={option.id} style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem", cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={config.codexModels.includes(option.id)}
+                        onChange={() => {
+                          setConfig((prev) => ({
+                            ...prev,
+                            codexModels: prev.codexModels.includes(option.id)
+                              ? prev.codexModels.filter((model) => model !== option.id)
+                              : [...prev.codexModels, option.id],
+                          }));
+                        }}
+                        style={{ width: "auto" }}
+                      />
+                      <code>{option.id}</code>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {config.codexModels.map((modelId, index) => (
+                <div key={index} style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.25rem" }}>
+                  <input
+                    type="text"
+                    placeholder="e.g., gpt-5.4-mini"
+                    value={modelId}
+                    onChange={(e) => {
+                      setConfig((prev) => ({
+                        ...prev,
+                        codexModels: prev.codexModels.map((m, i) => i === index ? e.target.value : m),
+                      }));
+                    }}
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ padding: "0.25rem 0.5rem" }}
+                    onClick={() => {
+                      setConfig((prev) => ({
+                        ...prev,
+                        codexModels: prev.codexModels.filter((_, i) => i !== index),
+                      }));
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ fontSize: "0.85rem", padding: "0.25rem 0.5rem", marginTop: "0.25rem" }}
+                disabled={!config.codexModel.trim()}
+                onClick={() => {
+                  setConfig((prev) => ({
+                    ...prev,
+                    codexModels: [...prev.codexModels, ""],
+                  }));
+                }}
+              >
+                + Add Model
+              </button>
+              <div className="hint">
+                Additional models appear in the OpenClaw model picker as <code>openai-codex/&lt;model&gt;</code>.
               </div>
             </div>
           </>

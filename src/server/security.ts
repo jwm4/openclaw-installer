@@ -21,6 +21,7 @@ const SENSITIVE_CONFIG_KEYS = new Set<keyof DeployConfig>([
   "modelEndpointApiKey",
   "telegramBotToken",
   "gcpServiceAccountJson",
+  "codexOauthAuthJson",
   "sandboxSshIdentity",
 ]);
 

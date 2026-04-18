@@ -494,6 +494,7 @@ export class KubernetesDeployer implements Deployer {
             : (config.openaiApiKey ? "(set)" : undefined),
         modelEndpointApiKey: config.modelEndpointApiKey || undefined,
         gcpServiceAccountJson: config.gcpServiceAccountJson ? "(set)" : undefined,
+        codexOauthAuthJson: undefined,
         telegramBotToken:
           config.telegramBotToken && (!config.telegramBotTokenRef || usesDefaultEnvSecretRef(config.telegramBotTokenRef))
             ? config.telegramBotToken

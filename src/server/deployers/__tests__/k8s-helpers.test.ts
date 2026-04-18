@@ -86,6 +86,36 @@ describe("model config generation", () => {
     expect(deriveModel(config)).toBe("openrouter/google/gemma-4-26b-a4b-it");
   });
 
+  it("normalizes Codex OAuth model ids and writes auth routing metadata", () => {
+    const config = makeConfig({
+      inferenceProvider: "openai-codex",
+      codexOauthProfileId: "openai-codex:default",
+      codexModel: "gpt-5.4",
+      codexModels: ["gpt-5.4-mini"],
+    });
+
+    expect(normalizeModelRef(config, "gpt-5.4")).toBe("openai-codex/gpt-5.4");
+    expect(deriveModel(config)).toBe("openai-codex/gpt-5.4");
+
+    const rendered = buildOpenClawConfig(config, "gateway-token") as {
+      auth?: {
+        profiles?: Record<string, { provider?: string; mode?: string }>;
+        order?: Record<string, string[]>;
+      };
+      agents?: { defaults?: { models?: Record<string, { alias?: string }> } };
+    };
+
+    expect(rendered.auth?.profiles?.["openai-codex:default"]).toEqual({
+      provider: "openai-codex",
+      mode: "oauth",
+    });
+    expect(rendered.auth?.order?.["openai-codex"]).toEqual(["openai-codex:default"]);
+    expect(rendered.agents?.defaults?.models).toMatchObject({
+      "openai-codex/gpt-5.4": { alias: "gpt-5.4" },
+      "openai-codex/gpt-5.4-mini": { alias: "gpt-5.4-mini" },
+    });
+  });
+
   it("normalizes Google model ids whether or not they already include the provider prefix", () => {
     const config = makeConfig({
       inferenceProvider: "google",

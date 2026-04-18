@@ -69,12 +69,17 @@ export function createInitialDeployFormConfig(): DeployFormConfig {
     openaiApiKey: "",
     googleApiKey: "",
     openrouterApiKey: "",
+    codexOauthMode: "codex-cli",
+    codexOauthProfileId: "openai-codex:default",
+    codexOauthAuthJsonPath: "",
     anthropicModel: "",
     openaiModel: "",
+    codexModel: "",
     googleModel: "",
     openrouterModel: "",
     anthropicModels: [],
     openaiModels: [],
+    codexModels: [],
     googleModels: [],
     openrouterModels: [],
     agentModel: "",
@@ -183,6 +188,7 @@ export function inferSavedInferenceProvider(vars: Record<string, unknown>): Infe
   if (
     savedInferenceProvider === "anthropic"
     || savedInferenceProvider === "openai"
+    || savedInferenceProvider === "openai-codex"
     || savedInferenceProvider === "google"
     || savedInferenceProvider === "openrouter"
     || savedInferenceProvider === "vertex-anthropic"
@@ -204,6 +210,13 @@ export function inferSavedInferenceProvider(vars: Record<string, unknown>): Infe
   }
   if (getStringVar(vars, "MODEL_ENDPOINT", "modelEndpoint") || modelEndpointApiKeyRef) {
     return "custom-endpoint";
+  }
+  if (
+    getStringVar(vars, "CODEX_OAUTH_PROFILE_ID", "codexOauthProfileId")
+    || getStringVar(vars, "CODEX_OAUTH_AUTH_JSON_PATH", "codexOauthAuthJsonPath")
+    || getStringVar(vars, "CODEX_MODEL", "codexModel")
+  ) {
+    return "openai-codex";
   }
   if (getStringVar(vars, "OPENROUTER_API_KEY", "openrouterApiKey") || openrouterApiKeyRef) {
     return "openrouter";
@@ -351,7 +364,13 @@ export function applySavedVarsToConfig(
         || prev.sandboxSshKnownHosts,
       port: getStringVar(vars, "OPENCLAW_PORT", "port") || prev.port,
       anthropicModel: getStringVar(vars, "ANTHROPIC_MODEL", "anthropicModel") || prev.anthropicModel,
+      codexOauthMode: "codex-cli",
+      codexOauthProfileId:
+        getStringVar(vars, "CODEX_OAUTH_PROFILE_ID", "codexOauthProfileId") || prev.codexOauthProfileId,
+      codexOauthAuthJsonPath:
+        getStringVar(vars, "CODEX_OAUTH_AUTH_JSON_PATH", "codexOauthAuthJsonPath") || prev.codexOauthAuthJsonPath,
       openaiModel: getStringVar(vars, "OPENAI_MODEL", "openaiModel") || prev.openaiModel,
+      codexModel: getStringVar(vars, "CODEX_MODEL", "codexModel") || prev.codexModel,
       googleApiKey:
         getStringVar(vars, "GEMINI_API_KEY", "googleApiKey")
           || getStringVar(vars, "GOOGLE_API_KEY", "googleApiKey")
@@ -364,6 +383,8 @@ export function applySavedVarsToConfig(
         decodeStringArrayVar(vars, "ANTHROPIC_MODELS_B64", "anthropicModels") || prev.anthropicModels,
       openaiModels:
         decodeStringArrayVar(vars, "OPENAI_MODELS_B64", "openaiModels") || prev.openaiModels,
+      codexModels:
+        decodeStringArrayVar(vars, "CODEX_MODELS_B64", "codexModels") || prev.codexModels,
       googleModels:
         decodeStringArrayVar(vars, "GOOGLE_MODELS_B64", "googleModels") || prev.googleModels,
       openrouterModels:
@@ -511,12 +532,17 @@ export function buildDeployRequestBody(params: {
       config.sandboxEnabled ? config.sandboxSshKnownHosts || undefined : undefined,
     anthropicApiKey: sel("anthropic") && !anthropicApiKeyRef ? trimToUndefined(config.anthropicApiKey) : undefined,
     openaiApiKey: sel("openai") && !openaiApiKeyRef ? trimToUndefined(config.openaiApiKey) : undefined,
+    codexOauthMode: sel("openai-codex") ? "codex-cli" : undefined,
+    codexOauthProfileId: sel("openai-codex") ? trimToUndefined(config.codexOauthProfileId) : undefined,
+    codexOauthAuthJsonPath: sel("openai-codex") ? trimToUndefined(config.codexOauthAuthJsonPath) : undefined,
     googleApiKey: sel("google") && !googleApiKeyRef ? trimToUndefined(config.googleApiKey) : undefined,
     openrouterApiKey: sel("openrouter") && !openrouterApiKeyRef ? trimToUndefined(config.openrouterApiKey) : undefined,
     anthropicModel: sel("anthropic") ? trimToUndefined(config.anthropicModel) : undefined,
     anthropicModels: sel("anthropic") && config.anthropicModels.length > 0 ? config.anthropicModels : undefined,
     openaiModel: sel("openai") ? trimToUndefined(config.openaiModel) : undefined,
     openaiModels: sel("openai") && config.openaiModels.length > 0 ? config.openaiModels : undefined,
+    codexModel: sel("openai-codex") ? trimToUndefined(config.codexModel) : undefined,
+    codexModels: sel("openai-codex") && config.codexModels.length > 0 ? config.codexModels : undefined,
     googleModel: sel("google") ? trimToUndefined(config.googleModel) : undefined,
     googleModels: sel("google") && config.googleModels.length > 0 ? config.googleModels : undefined,
     openrouterModel: sel("openrouter") ? trimToUndefined(config.openrouterModel) : undefined,
@@ -605,12 +631,17 @@ export function buildEnvFileContent(params: {
     `INFERENCE_PROVIDER=${inferenceProvider}`,
     `ANTHROPIC_API_KEY=${sel("anthropic") && !anthropicApiKeyRef ? config.anthropicApiKey : ""}`,
     `OPENAI_API_KEY=${sel("openai") && !openaiApiKeyRef ? config.openaiApiKey : ""}`,
+    `CODEX_OAUTH_MODE=${sel("openai-codex") ? "codex-cli" : ""}`,
+    `CODEX_OAUTH_PROFILE_ID=${sel("openai-codex") ? config.codexOauthProfileId : ""}`,
+    `CODEX_OAUTH_AUTH_JSON_PATH=${sel("openai-codex") ? config.codexOauthAuthJsonPath : ""}`,
     `GEMINI_API_KEY=${sel("google") && !googleApiKeyRef ? config.googleApiKey : ""}`,
     `OPENROUTER_API_KEY=${sel("openrouter") && !openrouterApiKeyRef ? config.openrouterApiKey : ""}`,
     `ANTHROPIC_MODEL=${sel("anthropic") ? config.anthropicModel : ""}`,
     `ANTHROPIC_MODELS_B64=${encodeBase64(JSON.stringify(sel("anthropic") ? config.anthropicModels : []))}`,
     `OPENAI_MODEL=${sel("openai") ? config.openaiModel : ""}`,
     `OPENAI_MODELS_B64=${encodeBase64(JSON.stringify(sel("openai") ? config.openaiModels : []))}`,
+    `CODEX_MODEL=${sel("openai-codex") ? config.codexModel : ""}`,
+    `CODEX_MODELS_B64=${encodeBase64(JSON.stringify(sel("openai-codex") ? config.codexModels : []))}`,
     `GOOGLE_MODEL=${sel("google") ? config.googleModel : ""}`,
     `GOOGLE_MODELS_B64=${encodeBase64(JSON.stringify(sel("google") ? config.googleModels : []))}`,
     `OPENROUTER_MODEL=${sel("openrouter") ? config.openrouterModel : ""}`,

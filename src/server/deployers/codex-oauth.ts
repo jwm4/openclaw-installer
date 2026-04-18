@@ -1,0 +1,148 @@
+import type { DeployConfig } from "./types.js";
+
+export const OPENAI_CODEX_PROVIDER = "openai-codex";
+export const DEFAULT_CODEX_MODEL = "gpt-5.4";
+export const DEFAULT_CODEX_PROFILE_ID = `${OPENAI_CODEX_PROVIDER}:default`;
+export const CODEX_AUTH_PROFILES_SECRET_KEY = "OPENAI_CODEX_AUTH_PROFILES_JSON";
+
+type CodexCliAuthFile = {
+  auth_mode?: unknown;
+  tokens?: {
+    access_token?: unknown;
+    refresh_token?: unknown;
+    account_id?: unknown;
+  };
+};
+
+type AuthProfileStoreJson = {
+  version: 1;
+  profiles: Record<string, Record<string, unknown>>;
+};
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function decodeBase64UrlJson(segment: string): Record<string, unknown> | undefined {
+  try {
+    const normalized = segment.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const decoded = Buffer.from(padded, "base64").toString("utf8");
+    const parsed = JSON.parse(decoded);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveJwtExpiresMs(accessToken: string): number {
+  const payload = accessToken.split(".")[1];
+  if (!payload) {
+    return 0;
+  }
+  const parsed = decodeBase64UrlJson(payload);
+  const exp = parsed?.exp;
+  return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : 0;
+}
+
+export function normalizeCodexOauthProfileId(value?: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return DEFAULT_CODEX_PROFILE_ID;
+  }
+  return trimmed.includes(":") ? trimmed : `${OPENAI_CODEX_PROVIDER}:${trimmed}`;
+}
+
+export function normalizeCodexModelRef(modelRef?: string): string {
+  const trimmed = modelRef?.trim() || DEFAULT_CODEX_MODEL;
+  return trimmed.startsWith(`${OPENAI_CODEX_PROVIDER}/`)
+    ? trimmed
+    : `${OPENAI_CODEX_PROVIDER}/${trimmed}`;
+}
+
+export function codexModelIdFromRef(modelRef?: string): string {
+  const ref = normalizeCodexModelRef(modelRef);
+  return ref.slice(`${OPENAI_CODEX_PROVIDER}/`.length);
+}
+
+export function shouldUseCodexOauth(config: DeployConfig): boolean {
+  return config.inferenceProvider === OPENAI_CODEX_PROVIDER
+    || Boolean(config.codexOauthProfileId?.trim())
+    || Boolean(config.codexOauthAuthJson?.trim())
+    || Boolean(config.codexModel?.trim())
+    || Boolean(config.codexModels?.length);
+}
+
+export function buildCodexOauthCredentialFromCliAuthJson(raw: string): Record<string, unknown> {
+  let parsed: CodexCliAuthFile;
+  try {
+    parsed = JSON.parse(raw) as CodexCliAuthFile;
+  } catch {
+    throw new Error("Codex OAuth auth.json is not valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || parsed.auth_mode !== "chatgpt") {
+    throw new Error('Codex OAuth auth.json must have auth_mode: "chatgpt"');
+  }
+  const access = readString(parsed.tokens?.access_token);
+  const refresh = readString(parsed.tokens?.refresh_token);
+  if (!access || !refresh) {
+    throw new Error("Codex OAuth auth.json is missing access_token or refresh_token");
+  }
+  const accountId = readString(parsed.tokens?.account_id);
+  return {
+    type: "oauth",
+    provider: OPENAI_CODEX_PROVIDER,
+    access,
+    refresh,
+    expires: resolveJwtExpiresMs(access),
+    ...(accountId ? { accountId } : {}),
+  };
+}
+
+export function buildCodexOauthAuthProfileStore(
+  config: DeployConfig,
+  baseProfiles: Record<string, Record<string, unknown>> = {},
+): AuthProfileStoreJson | undefined {
+  const raw = config.codexOauthAuthJson?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  const profileId = normalizeCodexOauthProfileId(config.codexOauthProfileId);
+  return {
+    version: 1,
+    profiles: {
+      ...baseProfiles,
+      [profileId]: buildCodexOauthCredentialFromCliAuthJson(raw),
+    },
+  };
+}
+
+export function codexOauthAuthProfileStoreJson(
+  config: DeployConfig,
+  baseProfiles: Record<string, Record<string, unknown>> = {},
+): string | undefined {
+  const store = buildCodexOauthAuthProfileStore(config, baseProfiles);
+  return store ? JSON.stringify(store, null, 2) : undefined;
+}
+
+export function attachCodexOauthConfig(ocConfig: Record<string, unknown>, config: DeployConfig): void {
+  if (!shouldUseCodexOauth(config)) {
+    return;
+  }
+  const profileId = normalizeCodexOauthProfileId(config.codexOauthProfileId);
+  const auth = (ocConfig.auth as Record<string, unknown> | undefined) || {};
+  const profiles = (auth.profiles as Record<string, unknown> | undefined) || {};
+  const order = (auth.order as Record<string, string[]> | undefined) || {};
+  profiles[profileId] = {
+    provider: OPENAI_CODEX_PROVIDER,
+    mode: "oauth",
+  };
+  order[OPENAI_CODEX_PROVIDER] = [profileId];
+  ocConfig.auth = {
+    ...auth,
+    profiles,
+    order,
+  };
+}

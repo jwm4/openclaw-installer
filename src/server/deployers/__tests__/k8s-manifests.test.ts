@@ -119,6 +119,32 @@ describe("k8s state sync manifests", () => {
     expect(initScript).toContain('"id": "providers/openai/apiKey"');
   });
 
+  it("stores imported Codex OAuth profiles in the Secret instead of the init command", () => {
+    const codexAuthJson = JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        access_token: "codex-access-token",
+        refresh_token: "codex-refresh-token",
+        account_id: "acct_123",
+      },
+    });
+    const codexConfig = makeConfig({
+      inferenceProvider: "openai-codex",
+      codexOauthAuthJson: codexAuthJson,
+      codexOauthProfileId: "openai-codex:default",
+      codexModel: "gpt-5.4",
+    });
+
+    const secret = secretManifest("openclaw-alpha-openclaw", codexConfig, "gateway-token");
+    const deployment = deploymentManifest("openclaw-alpha-openclaw", codexConfig);
+    const initScript = deployment.spec?.template.spec?.initContainers?.[0]?.command?.[2] ?? "";
+
+    expect(secret.stringData?.OPENAI_CODEX_AUTH_PROFILES_JSON).toContain('"openai-codex:default"');
+    expect(secret.stringData?.OPENAI_CODEX_AUTH_PROFILES_JSON).toContain("codex-refresh-token");
+    expect(initScript).toContain("/openclaw-secrets/OPENAI_CODEX_AUTH_PROFILES_JSON");
+    expect(initScript).not.toContain("codex-refresh-token");
+  });
+
   it("uses the dedicated openclaw service account for non-A2A deployments", () => {
     const deployment = deploymentManifest("openclaw-alpha-openclaw", config);
     expect(deployment.spec?.template?.spec?.serviceAccountName).toBe("openclaw");

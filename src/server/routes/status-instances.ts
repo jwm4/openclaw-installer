@@ -10,7 +10,7 @@ import {
 import { discoverK8sInstances } from "../deployers/kubernetes.js";
 import { isClusterReachable } from "../services/k8s.js";
 import { registry } from "../deployers/registry.js";
-import type { DeployResult, DeploySecretRef } from "../deployers/types.js";
+import type { CodexOauthMode, DeployResult, DeploySecretRef, InferenceProvider } from "../deployers/types.js";
 import type { PodmanSecretMapping } from "../../shared/podman-secrets.js";
 
 function decodeSavedBase64(value?: string): string | undefined {
@@ -84,15 +84,7 @@ export function parseSavedLocalInstanceConfig(savedVars: Record<string, string>)
     port: savedVars.OPENCLAW_PORT ? parseInt(savedVars.OPENCLAW_PORT, 10) : undefined,
     containerRunArgs: savedVars.OPENCLAW_CONTAINER_RUN_ARGS || undefined,
     podmanSecretMappings: decodeSavedJson<PodmanSecretMapping[]>(savedVars.PODMAN_SECRET_MAPPINGS_B64),
-    inferenceProvider: savedVars.INFERENCE_PROVIDER as
-      | "anthropic"
-      | "openai"
-      | "google"
-      | "openrouter"
-      | "vertex-anthropic"
-      | "vertex-google"
-      | "custom-endpoint"
-      | undefined,
+    inferenceProvider: savedVars.INFERENCE_PROVIDER as InferenceProvider | undefined,
     agentSecurityMode:
       (savedVars.AGENT_SECURITY_MODE as "basic" | "secretrefs") || undefined,
     secretsProvidersJson: decodeSavedBase64(savedVars.SECRETS_PROVIDERS_JSON_B64),
@@ -108,6 +100,11 @@ export function parseSavedLocalInstanceConfig(savedVars: Record<string, string>)
     openrouterApiKey: savedVars.OPENROUTER_API_KEY || undefined,
     anthropicModel: savedVars.ANTHROPIC_MODEL || undefined,
     openaiModel: savedVars.OPENAI_MODEL || undefined,
+    codexOauthMode: savedVars.CODEX_OAUTH_MODE as CodexOauthMode | undefined,
+    codexOauthProfileId: savedVars.CODEX_OAUTH_PROFILE_ID || undefined,
+    codexOauthAuthJsonPath: savedVars.CODEX_OAUTH_AUTH_JSON_PATH || undefined,
+    codexModel: savedVars.CODEX_MODEL || undefined,
+    codexModels: decodeSavedJson(savedVars.CODEX_MODELS_B64),
     googleModel: savedVars.GOOGLE_MODEL || undefined,
     openrouterModel: savedVars.OPENROUTER_MODEL || undefined,
     modelFallbacks: decodeSavedJson(savedVars.MODEL_FALLBACKS_B64),

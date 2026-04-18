@@ -5,11 +5,13 @@ export type BuiltinDeployMode = "local" | "kubernetes" | "ssh" | "fleet";
 export type InferenceProvider =
   | "anthropic"
   | "openai"
+  | "openai-codex"
   | "google"
   | "openrouter"
   | "vertex-anthropic"
   | "vertex-google"
   | "custom-endpoint";
+export type CodexOauthMode = "codex-cli" | "profile";
 export type SecretRefSource = "env" | "file" | "exec";
 
 export interface DeploySecretRef {
@@ -67,12 +69,18 @@ export interface DeployConfig {
   openaiApiKey?: string;
   googleApiKey?: string;
   openrouterApiKey?: string;
+  codexOauthMode?: CodexOauthMode;
+  codexOauthProfileId?: string;
+  codexOauthAuthJsonPath?: string;
+  codexOauthAuthJson?: string;
   anthropicModel?: string;
   openaiModel?: string;
+  codexModel?: string;
   googleModel?: string;
   openrouterModel?: string;
   anthropicModels?: string[];
   openaiModels?: string[];
+  codexModels?: string[];
   googleModels?: string[];
   openrouterModels?: string[];
   inferenceProvider?: InferenceProvider;

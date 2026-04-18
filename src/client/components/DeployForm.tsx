@@ -1180,7 +1180,11 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
               <label>Additional podman/docker run args <span style={{ color: "var(--text-secondary)", fontWeight: "normal" }}>(optional)</span></label>
               <input
                 type="text"
+                autoComplete="new-password"
+                data-1p-ignore="true"
+                data-lpignore="true"
                 placeholder="e.g., --userns=keep-id --security-opt label=disable"
+                spellCheck={false}
                 value={config.containerRunArgs}
                 onChange={(e) => update("containerRunArgs", e.target.value)}
               />
