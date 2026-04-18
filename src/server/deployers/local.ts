@@ -1211,8 +1211,11 @@ function localStateMountArgs(config: DeployConfig): string[] {
   return ["-v", `${volumeName(config)}:/home/node/.openclaw`];
 }
 
-function runtimeOwnershipFixupCommand(): string {
-  return "chown -R node:node /home/node/.openclaw 2>/dev/null || true";
+export function runtimeOwnershipFixupCommand(): string {
+  // Fix for #71: strip world bits after chown so other users/processes on the
+  // host cannot read credentials (gateway tokens, API key refs) from openclaw.json
+  // or traverse the state directory.
+  return "chown -R node:node /home/node/.openclaw 2>/dev/null || true && chmod -R o-rwx /home/node/.openclaw 2>/dev/null || true";
 }
 
 /**
@@ -1355,7 +1358,7 @@ function buildRunArgs(
   runArgs.push(image);
 
   // Bind to lan (0.0.0.0) so port mapping works from host into pod/container
-  runArgs.push("node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789");
+  runArgs.push("sh", "-c", "umask 007 && exec node dist/index.js gateway --bind lan --port 18789");
 
   return runArgs;
 }
