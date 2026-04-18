@@ -17,6 +17,7 @@ import {
   buildEnvFileContent,
   createInitialDeployFormConfig,
   inferSavedInferenceProvider,
+  inferSelectedProviders,
 } from "./deploy-form/serialization.js";
 import { ProviderSection } from "./deploy-form/ProviderSection.js";
 import { SandboxSection } from "./deploy-form/SandboxSection.js";
@@ -45,6 +46,9 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
   const [autoLoadedEnvDir, setAutoLoadedEnvDir] = useState<string | null>(null);
   const [inferenceProvider, setInferenceProvider] = useState<InferenceProvider>("anthropic");
   const [selectedProviders, setSelectedProviders] = useState<InferenceProvider[]>(["anthropic"]);
+  // Additional providers inferred from a loaded config, passed to ProviderSection
+  // so it can restore the "Add Provider" cards. Fix for #122.
+  const [additionalProvidersFromConfig, setAdditionalProvidersFromConfig] = useState<InferenceProvider[]>([]);
   const [modeManuallySelected, setModeManuallySelected] = useState(false);
   const [autoSwitchMessage, setAutoSwitchMessage] = useState<string | null>(null);
   // Refs so refreshEnvironment can read latest values without re-creating the callback
@@ -315,6 +319,13 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
     const applied = applySavedVarsToConfig(vars, baseConfig);
     setNamespaceManuallyEdited(applied.namespaceManuallyEdited);
     setConfig(applied.config);
+
+    // Fix for #122: infer additional providers from restored config data
+    // so ProviderSection can restore "Add Provider" cards.
+    const primary = nextInferenceProvider || inferenceProvider;
+    const inferred = inferSelectedProviders(applied.config, primary);
+    setSelectedProviders(inferred);
+    setAdditionalProvidersFromConfig(inferred.filter((p) => p !== primary));
   };
 
   const [displayNameManuallyEdited, setDisplayNameManuallyEdited] = useState(false);
@@ -1263,6 +1274,7 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
           fetchModelEndpointOptions={fetchModelEndpointOptions}
           gcpDefaults={gcpDefaults}
           inferenceProvider={inferenceProvider}
+          initialAdditionalProviders={additionalProvidersFromConfig}
           loadingModelEndpointOptions={loadingModelEndpointOptions}
           mode={mode}
           modelEndpointOptions={modelEndpointOptions}

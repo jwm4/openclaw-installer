@@ -237,6 +237,52 @@ export function inferSavedInferenceProvider(vars: Record<string, unknown>): Infe
   return undefined;
 }
 
+/**
+ * Infer which providers are active by scanning a restored config for non-empty
+ * provider-specific data (model, models array, or API key).
+ * Fix for #122: restoring additional providers from saved configs.
+ *
+ * Note: SecretRef IDs are NOT checked because default Podman secret mappings
+ * pre-populate them for all providers regardless of selection.
+ */
+export function inferSelectedProviders(
+  config: DeployFormConfig,
+  primaryProvider: InferenceProvider,
+): InferenceProvider[] {
+  const providers: InferenceProvider[] = [primaryProvider];
+
+  function addIf(provider: InferenceProvider, hasData: boolean) {
+    if (provider !== primaryProvider && hasData) {
+      providers.push(provider);
+    }
+  }
+
+  addIf("anthropic",
+    Boolean(config.anthropicModel) || config.anthropicModels.length > 0
+    || Boolean(config.anthropicApiKey));
+  addIf("openai",
+    Boolean(config.openaiModel) || config.openaiModels.length > 0
+    || Boolean(config.openaiApiKey));
+  addIf("openai-codex",
+    Boolean(config.codexModel) || config.codexModels.length > 0
+    || Boolean(config.codexOauthAuthJsonPath));
+  addIf("google",
+    Boolean(config.googleModel) || config.googleModels.length > 0
+    || Boolean(config.googleApiKey));
+  addIf("openrouter",
+    Boolean(config.openrouterModel) || config.openrouterModels.length > 0
+    || Boolean(config.openrouterApiKey));
+  addIf("vertex-anthropic",
+    Boolean(config.vertexAnthropicModel) || config.vertexAnthropicModels.length > 0);
+  addIf("vertex-google",
+    Boolean(config.vertexGoogleModel) || config.vertexGoogleModels.length > 0);
+  addIf("custom-endpoint",
+    Boolean(config.modelEndpoint) || Boolean(config.modelEndpointModel)
+    || Boolean(config.modelEndpointApiKey));
+
+  return providers;
+}
+
 export function applySavedVarsToConfig(
   vars: Record<string, unknown>,
   prev: DeployFormConfig,

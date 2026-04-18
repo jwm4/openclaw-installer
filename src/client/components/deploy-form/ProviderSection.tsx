@@ -18,6 +18,7 @@ interface ProviderSectionProps {
   fetchModelEndpointOptions: () => Promise<void>;
   gcpDefaults: GcpDefaults | null;
   inferenceProvider: InferenceProvider;
+  initialAdditionalProviders?: InferenceProvider[];
   loadingModelEndpointOptions: boolean;
   mode: string;
   modelEndpointOptions: ModelEndpointOption[];
@@ -140,6 +141,7 @@ export function ProviderSection({
   fetchModelEndpointOptions,
   gcpDefaults,
   inferenceProvider,
+  initialAdditionalProviders,
   loadingModelEndpointOptions,
   mode,
   modelEndpointOptions,
@@ -165,6 +167,21 @@ export function ProviderSection({
 }: ProviderSectionProps) {
   const [additionalProviders, setAdditionalProviders] = useState<AdditionalProvider[]>([]);
   const nextId = useRef(0);
+
+  // Fix for #122: restore additional provider cards from a loaded config.
+  // When initialAdditionalProviders changes (e.g. after loading a saved
+  // config), populate the additionalProviders state so the cards appear.
+  const initKey = initialAdditionalProviders?.join(",") || "";
+  useEffect(() => {
+    if (!initialAdditionalProviders || initialAdditionalProviders.length === 0) {
+      return;
+    }
+    const restored: AdditionalProvider[] = initialAdditionalProviders.map((provider) => ({
+      id: nextId.current++,
+      provider,
+    }));
+    setAdditionalProviders(restored);
+  }, [initKey]);
 
   const selectedAdditionalProviders = additionalProviders
     .map((ap) => ap.provider)
