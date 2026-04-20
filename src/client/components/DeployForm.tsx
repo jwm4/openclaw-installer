@@ -17,6 +17,7 @@ import {
   buildEnvFileContent,
   createInitialDeployFormConfig,
   inferSavedInferenceProvider,
+  inferSelectedProviders,
 } from "./deploy-form/serialization.js";
 import { ProviderSection } from "./deploy-form/ProviderSection.js";
 import { SandboxSection } from "./deploy-form/SandboxSection.js";
@@ -44,6 +45,10 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
   const [loadedConfigLabel, setLoadedConfigLabel] = useState<string | null>(null);
   const [autoLoadedEnvDir, setAutoLoadedEnvDir] = useState<string | null>(null);
   const [inferenceProvider, setInferenceProvider] = useState<InferenceProvider>("anthropic");
+  const [selectedProviders, setSelectedProviders] = useState<InferenceProvider[]>(["anthropic"]);
+  // Additional providers inferred from a loaded config, passed to ProviderSection
+  // so it can restore the "Add Provider" cards. Fix for #122.
+  const [additionalProvidersFromConfig, setAdditionalProvidersFromConfig] = useState<InferenceProvider[]>([]);
   const [modeManuallySelected, setModeManuallySelected] = useState(false);
   const [autoSwitchMessage, setAutoSwitchMessage] = useState<string | null>(null);
   // Refs so refreshEnvironment can read latest values without re-creating the callback
@@ -314,6 +319,13 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
     const applied = applySavedVarsToConfig(vars, baseConfig);
     setNamespaceManuallyEdited(applied.namespaceManuallyEdited);
     setConfig(applied.config);
+
+    // Fix for #122: infer additional providers from restored config data
+    // so ProviderSection can restore "Add Provider" cards.
+    const primary = nextInferenceProvider || inferenceProvider;
+    const inferred = inferSelectedProviders(applied.config, primary);
+    setSelectedProviders(inferred);
+    setAdditionalProvidersFromConfig(inferred.filter((p) => p !== primary));
   };
 
   const [displayNameManuallyEdited, setDisplayNameManuallyEdited] = useState(false);
@@ -585,6 +597,10 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
     }
   }, [vertexCredsForFetch]);
 
+  const handleSelectedProvidersChange = useCallback((providers: InferenceProvider[]) => {
+    setSelectedProviders(providers);
+  }, []);
+
   const handleDeploy = async () => {
     if (!isValid) {
       return;
@@ -597,6 +613,7 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
         config,
         isVertex,
         suggestedNamespace,
+        selectedProviders,
         anthropicApiKeyRef,
         openaiApiKeyRef,
         googleApiKeyRef,
@@ -628,6 +645,7 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
       inferenceProvider,
       isVertex,
       suggestedNamespace,
+      selectedProviders,
       anthropicApiKeyRef,
       openaiApiKeyRef,
       googleApiKeyRef,
@@ -1173,7 +1191,11 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
               <label>Additional podman/docker run args <span style={{ color: "var(--text-secondary)", fontWeight: "normal" }}>(optional)</span></label>
               <input
                 type="text"
+                autoComplete="new-password"
+                data-1p-ignore="true"
+                data-lpignore="true"
                 placeholder="e.g., --userns=keep-id --security-opt label=disable"
+                spellCheck={false}
                 value={config.containerRunArgs}
                 onChange={(e) => update("containerRunArgs", e.target.value)}
               />
@@ -1252,6 +1274,7 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
           fetchModelEndpointOptions={fetchModelEndpointOptions}
           gcpDefaults={gcpDefaults}
           inferenceProvider={inferenceProvider}
+          initialAdditionalProviders={additionalProvidersFromConfig}
           loadingModelEndpointOptions={loadingModelEndpointOptions}
           mode={mode}
           modelEndpointOptions={modelEndpointOptions}
@@ -1259,6 +1282,7 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
           setConfig={setConfig}
           setInferenceProvider={setInferenceProvider}
           update={update}
+          onSelectedProvidersChange={handleSelectedProvidersChange}
           loadingAnthropicModels={loadingAnthropicModels}
           loadingOpenaiModels={loadingOpenaiModels}
           anthropicModelOptions={anthropicModelOptions}
@@ -1341,6 +1365,41 @@ export default function DeployForm({ onDeployStarted }: DeployFormProps) {
               </div>
             </div>
           </>
+        )}
+
+        <h3 style={{ marginTop: "1.5rem" }}>Browser</h3>
+
+        <div className="form-group">
+          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <input
+              type="checkbox"
+              checked={config.chromiumSidecar}
+              onChange={(e) =>
+                setConfig((prev) => ({ ...prev, chromiumSidecar: e.target.checked }))
+              }
+              style={{ width: "auto" }}
+            />
+            Enable browser sidecar (headless Chromium)
+          </label>
+          <div className="hint">
+            Runs a headless Chromium container alongside the agent so it can browse the web,
+            fill forms, and take screenshots.
+          </div>
+        </div>
+
+        {config.chromiumSidecar && (
+          <div className="form-group">
+            <label>Chromium Image (optional)</label>
+            <input
+              type="text"
+              placeholder="chromedp/headless-shell:stable"
+              value={config.chromiumImage}
+              onChange={(e) => update("chromiumImage", e.target.value)}
+            />
+            <div className="hint">
+              Leave blank for the default. Use ghcr.io/browserless/chromium for advanced features like session queueing and token auth.
+            </div>
+          </div>
         )}
 
         <SandboxSection

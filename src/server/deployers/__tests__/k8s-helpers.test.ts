@@ -86,6 +86,36 @@ describe("model config generation", () => {
     expect(deriveModel(config)).toBe("openrouter/google/gemma-4-26b-a4b-it");
   });
 
+  it("normalizes Codex OAuth model ids and writes auth routing metadata", () => {
+    const config = makeConfig({
+      inferenceProvider: "openai-codex",
+      codexOauthProfileId: "openai-codex:default",
+      codexModel: "gpt-5.4",
+      codexModels: ["gpt-5.4-mini"],
+    });
+
+    expect(normalizeModelRef(config, "gpt-5.4")).toBe("openai-codex/gpt-5.4");
+    expect(deriveModel(config)).toBe("openai-codex/gpt-5.4");
+
+    const rendered = buildOpenClawConfig(config, "gateway-token") as {
+      auth?: {
+        profiles?: Record<string, { provider?: string; mode?: string }>;
+        order?: Record<string, string[]>;
+      };
+      agents?: { defaults?: { models?: Record<string, { alias?: string }> } };
+    };
+
+    expect(rendered.auth?.profiles?.["openai-codex:default"]).toEqual({
+      provider: "openai-codex",
+      mode: "oauth",
+    });
+    expect(rendered.auth?.order?.["openai-codex"]).toEqual(["openai-codex:default"]);
+    expect(rendered.agents?.defaults?.models).toMatchObject({
+      "openai-codex/gpt-5.4": { alias: "gpt-5.4" },
+      "openai-codex/gpt-5.4-mini": { alias: "gpt-5.4-mini" },
+    });
+  });
+
   it("normalizes Google model ids whether or not they already include the provider prefix", () => {
     const config = makeConfig({
       inferenceProvider: "google",
@@ -96,6 +126,47 @@ describe("model config generation", () => {
     expect(normalizeModelRef(config, "gemini-3.1-pro-preview")).toBe("google/gemini-3.1-pro-preview");
     expect(normalizeModelRef(config, "google/gemini-3.1-pro-preview")).toBe("google/gemini-3.1-pro-preview");
     expect(deriveModel(config)).toBe("google/gemini-3.1-pro-preview");
+  });
+
+  it("uses the endpoint model as primary for custom endpoints even when agentModel is present", () => {
+    const config = makeConfig({
+      inferenceProvider: "custom-endpoint",
+      agentModel: "claude-sonnet-4-6",
+      modelEndpoint: "http://localhost:8080/v1",
+      modelEndpointModel: "local-model",
+    });
+
+    expect(deriveModel(config)).toBe("endpoint/local-model");
+  });
+
+  it("normalizes slash-containing endpoint model ids under the endpoint provider", () => {
+    const config = makeConfig({
+      inferenceProvider: "custom-endpoint",
+      modelEndpoint: "http://localhost:8080/v1",
+      modelEndpointModel: "google/gemma-4-E2B-it",
+    });
+
+    expect(normalizeModelRef(config, "google/gemma-4-E2B-it")).toBe("endpoint/google/gemma-4-E2B-it");
+    expect(normalizeModelRef(config, "endpoint/google/gemma-4-E2B-it")).toBe("endpoint/google/gemma-4-E2B-it");
+    expect(deriveModel(config)).toBe("endpoint/google/gemma-4-E2B-it");
+  });
+
+  it("publishes slash-containing endpoint model ids as endpoint provider refs", () => {
+    const config = makeConfig({
+      inferenceProvider: "custom-endpoint",
+      modelEndpoint: "http://localhost:8080/v1",
+      modelEndpointModel: "google/gemma-4-E2B-it",
+    });
+
+    const rendered = buildOpenClawConfig(config, "gateway-token") as {
+      agents?: {
+        defaults?: {
+          model?: { primary?: string };
+        };
+      };
+    };
+
+    expect(rendered.agents?.defaults?.model?.primary).toBe("endpoint/google/gemma-4-E2B-it");
   });
 
   it("publishes only the configured default model in the agent catalog", () => {
@@ -495,6 +566,29 @@ describe("model config generation", () => {
     expect(rendered.secrets?.providers).toMatchObject({
       default: { source: "env" },
     });
+  });
+
+  it("uses the local no-auth marker for unauthenticated model endpoints", () => {
+    const config = makeConfig({
+      inferenceProvider: "custom-endpoint",
+      openaiApiKey: "openai-key",
+      modelEndpoint: "http://localhost:8080/v1",
+      modelEndpointModel: "local-model",
+    });
+
+    const rendered = buildOpenClawConfig(config, "gateway-token") as {
+      models?: {
+        providers?: Record<string, {
+          apiKey?: unknown;
+          baseUrl?: string;
+          api?: string;
+        }>;
+      };
+    };
+
+    expect(rendered.models?.providers?.endpoint?.baseUrl).toBe("http://localhost:8080/v1");
+    expect(rendered.models?.providers?.endpoint?.api).toBe("openai-completions");
+    expect(rendered.models?.providers?.endpoint?.apiKey).toBeUndefined();
   });
 
   it("adds installer-provided provider models to the OpenClaw picker allowlist", () => {

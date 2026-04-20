@@ -5,11 +5,13 @@ export type BuiltinDeployMode = "local" | "kubernetes" | "ssh" | "fleet";
 export type InferenceProvider =
   | "anthropic"
   | "openai"
+  | "openai-codex"
   | "google"
   | "openrouter"
   | "vertex-anthropic"
   | "vertex-google"
   | "custom-endpoint";
+export type CodexOauthMode = "codex-cli" | "profile";
 export type SecretRefSource = "env" | "file" | "exec";
 
 export interface DeploySecretRef {
@@ -67,12 +69,18 @@ export interface DeployConfig {
   openaiApiKey?: string;
   googleApiKey?: string;
   openrouterApiKey?: string;
+  codexOauthMode?: CodexOauthMode;
+  codexOauthProfileId?: string;
+  codexOauthAuthJsonPath?: string;
+  codexOauthAuthJson?: string;
   anthropicModel?: string;
   openaiModel?: string;
+  codexModel?: string;
   googleModel?: string;
   openrouterModel?: string;
   anthropicModels?: string[];
   openaiModels?: string[];
+  codexModels?: string[];
   googleModels?: string[];
   openrouterModels?: string[];
   inferenceProvider?: InferenceProvider;
@@ -104,6 +112,9 @@ export interface DeployConfig {
   otelExperimentId?: string;   // MLflow experiment ID (optional, for MLflow endpoints)
   otelImage?: string;
   otelJaeger?: boolean;        // Run Jaeger all-in-one as a sidecar (UI on port 16686)
+  // Chromium browser sidecar (headless browser for web browsing)
+  chromiumSidecar?: boolean;
+  chromiumImage?: string;
   // Agent security
   cronEnabled?: boolean; // default: false (opt-in)
   subagentPolicy?: "none" | "self" | "unrestricted"; // default: "none"

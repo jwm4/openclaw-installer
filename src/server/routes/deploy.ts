@@ -1,8 +1,9 @@
 import { Router } from "express";
 import { v4 as uuid } from "uuid";
 import { readFileSync, existsSync } from "node:fs";
-import { userInfo } from "node:os";
-import type { DeployConfig, DeploySecretRef } from "../deployers/types.js";
+import { homedir, userInfo } from "node:os";
+import { join } from "node:path";
+import type { CodexOauthMode, DeployConfig, DeploySecretRef } from "../deployers/types.js";
 import { validateAgentName } from "../../shared/validate-agent-name.js";
 import { normalizePodmanSecretMappings } from "../../shared/podman-secrets.js";
 import { detectGcpDefaults, defaultVertexLocation } from "../services/gcp.js";
@@ -12,6 +13,7 @@ import { registry } from "../deployers/registry.js";
 import { k8sApiHttpCode } from "../services/k8s.js";
 import { createLogCallback, sendStatus } from "../ws.js";
 import { validateUserSuppliedPath } from "../security.js";
+import { OPENAI_CODEX_PROVIDER, buildCodexOauthCredentialFromCliAuthJson } from "../deployers/codex-oauth.js";
 
 const router = Router();
 
@@ -68,33 +70,46 @@ function normalizeStringArray(arr: string[] | undefined): string[] | undefined {
   return normalized.length > 0 ? normalized : undefined;
 }
 
-export function applyServerEnvFallbacks(config: DeployConfig, env: NodeJS.ProcessEnv = process.env): void {
+function normalizeCodexOauthMode(value: string | undefined): CodexOauthMode | undefined {
+  return value === "profile" || value === "codex-cli" ? value : undefined;
+}
+
+export function applyServerEnvFallbacks(
+  config: DeployConfig,
+  env: NodeJS.ProcessEnv = process.env,
+  selectedProviders?: string[],
+): void {
+  const sel = (p: string) => !selectedProviders || selectedProviders.includes(p);
   if (!config.image && env.OPENCLAW_IMAGE) {
     config.image = env.OPENCLAW_IMAGE;
   }
   if (
-    !config.anthropicApiKey
+    sel("anthropic")
+    && !config.anthropicApiKey
     && !config.anthropicApiKeyRef
     && env.ANTHROPIC_API_KEY
   ) {
     config.anthropicApiKey = env.ANTHROPIC_API_KEY;
   }
   if (
-    !config.openaiApiKey
+    sel("openai")
+    && !config.openaiApiKey
     && !config.openaiApiKeyRef
     && env.OPENAI_API_KEY
   ) {
     config.openaiApiKey = env.OPENAI_API_KEY;
   }
   if (
-    !config.googleApiKey
+    sel("google")
+    && !config.googleApiKey
     && !config.googleApiKeyRef
     && (env.GEMINI_API_KEY || env.GOOGLE_API_KEY)
   ) {
     config.googleApiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
   }
   if (
-    !config.openrouterApiKey
+    sel("openrouter")
+    && !config.openrouterApiKey
     && !config.openrouterApiKeyRef
     && env.OPENROUTER_API_KEY
   ) {
@@ -128,7 +143,8 @@ export function applyServerEnvFallbacks(config: DeployConfig, env: NodeJS.Proces
 }
 
 router.post("/", async (req, res) => {
-  const config = req.body as DeployConfig;
+  const { selectedProviders, ...configBody } = req.body as DeployConfig & { selectedProviders?: string[] };
+  const config = configBody as DeployConfig;
 
   config.image = trimOptional(config.image);
   config.modelEndpoint = trimOptional(config.modelEndpoint);
@@ -147,8 +163,14 @@ router.post("/", async (req, res) => {
   config.googleModel = trimOptional(config.googleModel);
   config.openrouterApiKey = trimOptional(config.openrouterApiKey);
   config.openrouterModel = trimOptional(config.openrouterModel);
+  config.codexOauthMode = normalizeCodexOauthMode(config.codexOauthMode);
+  config.codexOauthProfileId = trimOptional(config.codexOauthProfileId);
+  config.codexOauthAuthJsonPath = trimOptional(config.codexOauthAuthJsonPath);
+  config.codexOauthAuthJson = trimOptional(config.codexOauthAuthJson);
+  config.codexModel = trimOptional(config.codexModel);
   config.anthropicModels = normalizeStringArray(config.anthropicModels);
   config.openaiModels = normalizeStringArray(config.openaiModels);
+  config.codexModels = normalizeStringArray(config.codexModels);
   config.googleModels = normalizeStringArray(config.googleModels);
   config.openrouterModels = normalizeStringArray(config.openrouterModels);
   config.namespace = trimOptional(config.namespace);
@@ -254,13 +276,16 @@ router.post("/", async (req, res) => {
   }
 
   // Fall back to server environment for image and credentials.
-  applyServerEnvFallbacks(config);
+  // Only inject env keys for providers the client explicitly selected.
+  applyServerEnvFallbacks(config, process.env, selectedProviders);
 
   if (!config.inferenceProvider) {
     if (config.vertexEnabled) {
       config.inferenceProvider = config.vertexProvider === "google" ? "vertex-google" : "vertex-anthropic";
     } else if (config.modelEndpoint) {
       config.inferenceProvider = "custom-endpoint";
+    } else if (config.codexOauthProfileId || config.codexOauthAuthJson || config.codexOauthAuthJsonPath) {
+      config.inferenceProvider = OPENAI_CODEX_PROVIDER;
     } else if (config.openrouterApiKey || config.openrouterApiKeyRef) {
       config.inferenceProvider = "openrouter";
     } else if (config.anthropicApiKey) {
@@ -269,6 +294,33 @@ router.post("/", async (req, res) => {
       config.inferenceProvider = "openai";
     } else if (config.googleApiKey || config.googleApiKeyRef) {
       config.inferenceProvider = "google";
+    }
+  }
+
+  if (config.inferenceProvider === OPENAI_CODEX_PROVIDER && config.codexOauthMode !== "profile") {
+    if (!config.codexOauthAuthJson) {
+      const authPathInput = config.codexOauthAuthJsonPath || join(homedir(), ".codex", "auth.json");
+      let authPath: string;
+      try {
+        authPath = config.codexOauthAuthJsonPath
+          ? validateUserSuppliedPath(authPathInput, "Codex OAuth auth.json")
+          : authPathInput;
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      if (!existsSync(authPath)) {
+        res.status(400).json({ error: `Codex OAuth auth.json file not found: ${authPath}` });
+        return;
+      }
+      config.codexOauthAuthJsonPath = authPath;
+      config.codexOauthAuthJson = readFileSync(authPath, "utf-8");
+    }
+    try {
+      buildCodexOauthCredentialFromCliAuthJson(config.codexOauthAuthJson);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+      return;
     }
   }
 

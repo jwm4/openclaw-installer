@@ -5,18 +5,20 @@ import {
   tryParseProjectId,
   buildOpenClawConfig,
   buildManagedAgentAuthProfiles,
+  buildManagedAgentAuthProfilesSecretJson,
   resolveEnvSecretRefId,
-  usesDefaultEnvSecretRef,
 } from "./k8s-helpers.js";
 import type { DeployConfig } from "./types.js";
 import { shouldUseLitellmProxy, LITELLM_IMAGE, LITELLM_PORT } from "./litellm.js";
 import { shouldUseOtel, OTEL_COLLECTOR_IMAGE, OTEL_GRPC_PORT, OTEL_HTTP_PORT, otelAgentEnv } from "./otel.js";
+import { shouldUseChromiumSidecar, CHROMIUM_IMAGE, CHROMIUM_CDP_PORT, chromiumAgentEnv } from "./chromium.js";
 import type { TreeEntry } from "../state-tree.js";
 import { loadAgentSourceBundle, mainWorkspaceShellCondition } from "./agent-source.js";
 import {
   buildManagedVaultHelperScript,
   OPENCLAW_SERVICE_ACCOUNT_NAME,
 } from "./vault-helper.js";
+import { CODEX_AUTH_PROFILES_SECRET_KEY } from "./codex-oauth.js";
 
 export function namespaceManifest(ns: string): k8s.V1Namespace {
   return {
@@ -169,6 +171,8 @@ export function secretManifest(ns: string, config: DeployConfig, gatewayToken: s
   }
   if (config.modelEndpoint) data.MODEL_ENDPOINT = config.modelEndpoint;
   if (config.modelEndpointApiKey) data.MODEL_ENDPOINT_API_KEY = config.modelEndpointApiKey;
+  const authProfilesJson = buildManagedAgentAuthProfilesSecretJson(config);
+  if (authProfilesJson) data[CODEX_AUTH_PROFILES_SECRET_KEY] = authProfilesJson;
   const telegramEnvRefId = resolveEnvSecretRefId(config.telegramBotTokenRef, "TELEGRAM_BOT_TOKEN");
   if (config.telegramBotToken && telegramEnvRefId) {
     data[telegramEnvRefId] = config.telegramBotToken;
@@ -252,9 +256,18 @@ export function buildInitScript(config: DeployConfig): string {
   const workspaceRouting = mainWorkspaceShellCondition(mainWorkspaceDest, bundle);
   const vaultHelperScript = buildManagedVaultHelperScript();
   const authProfiles = buildManagedAgentAuthProfiles(config);
+  const authProfilesSecretJson = buildManagedAgentAuthProfilesSecretJson(config);
   const authManagedAgentIds = Array.from(new Set([id, ...((bundle?.agents || []).map((entry) => entry.id).filter(Boolean))]));
-  const authProfileLines = authProfiles
+  const authProfileLines = authProfilesSecretJson
     ? authManagedAgentIds
+      .map((agentId) => [
+        `mkdir -p /home/node/.openclaw/agents/${agentId}/agent`,
+        `if [ -f /openclaw-secrets/${CODEX_AUTH_PROFILES_SECRET_KEY} ]; then cp /openclaw-secrets/${CODEX_AUTH_PROFILES_SECRET_KEY} /home/node/.openclaw/agents/${agentId}/agent/auth-profiles.json; fi`,
+        `chmod 600 /home/node/.openclaw/agents/${agentId}/agent/auth-profiles.json 2>/dev/null || true`,
+      ].join("\n"))
+      .join("\n")
+    : authProfiles
+      ? authManagedAgentIds
       .map((agentId) => [
         `mkdir -p /home/node/.openclaw/agents/${agentId}/agent`,
         `cat > /home/node/.openclaw/agents/${agentId}/agent/auth-profiles.json <<'EOF_AUTH_PROFILES'`,
@@ -263,11 +276,11 @@ export function buildInitScript(config: DeployConfig): string {
         `chmod 600 /home/node/.openclaw/agents/${agentId}/agent/auth-profiles.json`,
       ].join("\n"))
       .join("\n")
-    : "";
+      : "";
 
   return `
 cp /config/openclaw.json /home/node/.openclaw/openclaw.json
-chmod 644 /home/node/.openclaw/openclaw.json
+chmod 600 /home/node/.openclaw/openclaw.json
 mkdir -p /home/node/.openclaw/bin
 mkdir -p /home/node/.openclaw/workspace
 mkdir -p /home/node/.openclaw/skills
@@ -291,6 +304,7 @@ cp /exec-approvals-src/exec-approvals.json /home/node/.openclaw/exec-approvals.j
 ${authProfileLines}
 chown -R 1000:0 /home/node/.openclaw 2>/dev/null || true
 chmod -R g=u /home/node/.openclaw 2>/dev/null || true
+chmod -R o-rwx /home/node/.openclaw 2>/dev/null || true
 chmod 0755 /home/node/.openclaw/bin/openclaw-vault 2>/dev/null || true
 echo "Config initialized"
 `.trim();
@@ -306,7 +320,6 @@ export function deploymentManifest(
   _execApprovalsContent?: string,
 ): k8s.V1Deployment {
   const image = defaultImage(config);
-  const id = agentId(config);
 
   const envVars: k8s.V1EnvVar[] = [
     { name: "HOME", value: "/home/node" },
@@ -324,12 +337,14 @@ export function deploymentManifest(
   const withA2a = Boolean(config.withA2a);
   // Direct sidecar only when OTEL is enabled and operator is NOT handling it
   const useOtelDirect = useOtel && !otelViaOperator;
+  const useChromium = shouldUseChromiumSidecar(config);
 
   const optionalKeys = [
     // Gateway always gets provider API keys so it can route to OpenAI/Anthropic
     // natively. LiteLLM only handles Vertex models.
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
     "OPENROUTER_API_KEY",
     "MODEL_ENDPOINT",
     "MODEL_ENDPOINT_API_KEY",
@@ -351,6 +366,13 @@ export function deploymentManifest(
   // OTEL collector env vars (tell the agent where to send traces)
   if (useOtel) {
     for (const [key, val] of Object.entries(otelAgentEnv())) {
+      envVars.push({ name: key, value: val });
+    }
+  }
+
+  // Chromium CDP env var (tell the agent where to connect to the browser)
+  if (useChromium) {
+    for (const [key, val] of Object.entries(chromiumAgentEnv())) {
       envVars.push({ name: key, value: val });
     }
   }
@@ -439,6 +461,7 @@ export function deploymentManifest(
               volumeMounts: [
                 { name: "openclaw-home", mountPath: "/home/node/.openclaw" },
                 { name: "config-template", mountPath: "/config" },
+                { name: "openclaw-secrets", mountPath: "/openclaw-secrets", readOnly: true },
                 { name: "agent-config", mountPath: "/agents" },
                 { name: "agent-tree-config", mountPath: "/agents-tree", readOnly: true },
                 { name: "skills-config", mountPath: "/skills-src", readOnly: true },
@@ -453,8 +476,8 @@ export function deploymentManifest(
               image,
               imagePullPolicy: "IfNotPresent",
               command: [
-                "node", "dist/index.js", "gateway", "run",
-                "--bind", "lan", "--port", "18789",
+                "sh", "-c",
+                "umask 007 && exec node dist/index.js gateway run --bind lan --port 18789",
               ],
               ports: [
                 { name: "gateway", containerPort: 18789, protocol: "TCP" },
@@ -561,6 +584,34 @@ export function deploymentManifest(
                 capabilities: { drop: ["ALL"] },
               },
             }] : []),
+            // Chromium browser sidecar: headless browser for web browsing via CDP
+            ...(useChromium ? [{
+              name: "chromium",
+              image: config.chromiumImage || CHROMIUM_IMAGE,
+              imagePullPolicy: "IfNotPresent" as const,
+              ports: [
+                { name: "cdp", containerPort: CHROMIUM_CDP_PORT, protocol: "TCP" as const },
+              ],
+              volumeMounts: [
+                { name: "chromium-shm", mountPath: "/dev/shm" },
+                { name: "chromium-tmp", mountPath: "/tmp" },
+              ],
+              resources: {
+                requests: { memory: "512Mi", cpu: "100m" },
+                limits: { memory: "1Gi", cpu: "500m" },
+              },
+              securityContext: {
+                allowPrivilegeEscalation: false,
+                runAsNonRoot: true,
+                capabilities: { drop: ["ALL"] },
+              },
+              readinessProbe: {
+                httpGet: { path: "/json/version", port: CHROMIUM_CDP_PORT as unknown as k8s.IntOrString },
+                initialDelaySeconds: 5,
+                periodSeconds: 10,
+                timeoutSeconds: 5,
+              },
+            }] : []),
             ...(withA2a ? [{
               name: "agent-card",
               image: "registry.redhat.io/ubi9:latest",
@@ -591,6 +642,7 @@ export function deploymentManifest(
           ],
           volumes: [
             { name: "openclaw-home", persistentVolumeClaim: { claimName: "openclaw-home-pvc" } },
+            { name: "openclaw-secrets", secret: { secretName: "openclaw-secrets" } },
             { name: "config-template", configMap: { name: "openclaw-config" } },
             { name: "agent-config", configMap: { name: "openclaw-agent" } },
             {
@@ -639,6 +691,12 @@ export function deploymentManifest(
               : []),
             ...(useOtelDirect
               ? [{ name: "otel-config", configMap: { name: "otel-collector-config" } }]
+              : []),
+            ...(useChromium
+              ? [
+                  { name: "chromium-shm", emptyDir: { medium: "Memory", sizeLimit: "256Mi" } },
+                  { name: "chromium-tmp", emptyDir: {} },
+                ]
               : []),
             ...(withA2a
               ? [

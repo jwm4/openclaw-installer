@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { applyGatewayRuntimeConfig, parseContainerRunArgs, shouldAlwaysPull } from "../local.js";
+import {
+  applyGatewayRuntimeConfig,
+  parseContainerRunArgs,
+  resolveLocalRuntimeModelEndpoint,
+  runtimeOwnershipFixupCommand,
+  shouldAlwaysPull,
+} from "../local.js";
 
 describe("shouldAlwaysPull", () => {
   it("returns true for :latest tag", () => {
@@ -92,6 +98,27 @@ describe("applyGatewayRuntimeConfig", () => {
   });
 });
 
+describe("resolveLocalRuntimeModelEndpoint", () => {
+  it("rewrites localhost endpoints for podman containers", () => {
+    expect(resolveLocalRuntimeModelEndpoint("http://localhost:8080/v1", "podman"))
+      .toBe("http://host.containers.internal:8080/v1");
+    expect(resolveLocalRuntimeModelEndpoint("http://127.0.0.1:8080/v1", "podman"))
+      .toBe("http://host.containers.internal:8080/v1");
+  });
+
+  it("rewrites localhost endpoints for docker containers", () => {
+    expect(resolveLocalRuntimeModelEndpoint("http://localhost:8080/v1", "docker"))
+      .toBe("http://host.docker.internal:8080/v1");
+  });
+
+  it("leaves already-routable endpoints unchanged", () => {
+    expect(resolveLocalRuntimeModelEndpoint("http://host.containers.internal:8080/v1", "podman"))
+      .toBe("http://host.containers.internal:8080/v1");
+    expect(resolveLocalRuntimeModelEndpoint("http://10.0.0.20:8080/v1", "podman"))
+      .toBe("http://10.0.0.20:8080/v1");
+  });
+});
+
 describe("parseContainerRunArgs", () => {
   it("parses quoted runtime args into argv tokens", () => {
     expect(
@@ -107,5 +134,23 @@ describe("parseContainerRunArgs", () => {
 
   it("rejects unterminated quotes", () => {
     expect(() => parseContainerRunArgs("--label 'broken")).toThrow("unterminated quote");
+  });
+});
+
+// Regression test for https://github.com/sallyom/openclaw-installer/issues/71:
+// The local bootstrap command must strip world bits from the state directory
+// so that other users/processes on the host cannot read gateway tokens or API
+// key references from openclaw.json.
+describe("runtimeOwnershipFixupCommand", () => {
+  it("strips world bits from the state directory after chown (issue #71)", () => {
+    const cmd = runtimeOwnershipFixupCommand();
+
+    expect(cmd).toContain("chown -R node:node /home/node/.openclaw");
+    expect(cmd).toContain("chmod -R o-rwx /home/node/.openclaw");
+
+    // chmod must run AFTER chown so ownership is correct before mode change
+    const chownIdx = cmd.indexOf("chown -R node:node /home/node/.openclaw");
+    const chmodIdx = cmd.indexOf("chmod -R o-rwx /home/node/.openclaw");
+    expect(chmodIdx).toBeGreaterThan(chownIdx);
   });
 });

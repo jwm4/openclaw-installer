@@ -3,11 +3,13 @@ import type { PodmanSecretMapping } from "../../../shared/podman-secrets.js";
 export type InferenceProvider =
   | "anthropic"
   | "openai"
+  | "openai-codex"
   | "google"
   | "openrouter"
   | "vertex-anthropic"
   | "vertex-google"
   | "custom-endpoint";
+export type CodexOauthMode = "codex-cli" | "profile";
 
 export type SecretRefSource = "env" | "file" | "exec";
 
@@ -125,12 +127,17 @@ export interface DeployFormConfig {
   openaiApiKey: string;
   googleApiKey: string;
   openrouterApiKey: string;
+  codexOauthMode: CodexOauthMode;
+  codexOauthProfileId: string;
+  codexOauthAuthJsonPath: string;
   anthropicModel: string;
   openaiModel: string;
+  codexModel: string;
   googleModel: string;
   openrouterModel: string;
   anthropicModels: string[];
   openaiModels: string[];
+  codexModels: string[];
   googleModels: string[];
   openrouterModels: string[];
   agentModel: string;
@@ -166,5 +173,7 @@ export interface DeployFormConfig {
   otelJaeger: boolean;
   otelEndpoint: string;
   otelExperimentId: string;
+  chromiumSidecar: boolean;
+  chromiumImage: string;
   podmanSecretMappings?: PodmanSecretMapping[];
 }

@@ -1,7 +1,8 @@
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { v4 as uuid } from "uuid";
 import type {
@@ -32,9 +33,10 @@ import {
   LITELLM_IMAGE,
   LITELLM_PORT,
 } from "./litellm.js";
-import { shouldUseOtel, OTEL_HTTP_PORT } from "./otel.js";
+import { resolveEndpointForContainer, shouldUseOtel, OTEL_HTTP_PORT } from "./otel.js";
 import { startOtelSidecar, stopOtelSidecar, startJaegerSidecar, otelContainerName, jaegerContainerName } from "./local-otel.js";
 import { JAEGER_UI_PORT } from "./otel.js";
+import { shouldUseChromiumSidecar, CHROMIUM_IMAGE, CHROMIUM_CDP_PORT, chromiumContainerName, chromiumAgentEnv } from "./chromium.js";
 import { agentWorkspaceDir, installerLocalInstanceDir, openclawHomeDir } from "../paths.js";
 import {
   buildConfiguredAgentModelCatalog,
@@ -50,6 +52,13 @@ import {
   resolveSubagentModel,
   usesDefaultEnvSecretRef,
 } from "./k8s-helpers.js";
+import {
+  OPENAI_CODEX_PROVIDER,
+  attachCodexOauthConfig,
+  buildCodexOauthCredentialFromCliAuthJson,
+  codexOauthAuthProfileStoreJson,
+  normalizeCodexModelRef,
+} from "./codex-oauth.js";
 import { buildSandboxConfig } from "./sandbox.js";
 import { buildSandboxToolPolicy } from "./tool-policy.js";
 import { loadAgentSourceBundle, loadAgentSourceMcpServers, mainWorkspaceShellCondition } from "./agent-source.js";
@@ -58,6 +67,10 @@ import { buildPodmanSecretRunArgs, hasPodmanSecretTarget } from "../../shared/po
 const DEFAULT_IMAGE = process.env.OPENCLAW_IMAGE || "ghcr.io/openclaw/openclaw:latest";
 const DEFAULT_VERTEX_IMAGE = process.env.OPENCLAW_VERTEX_IMAGE || DEFAULT_IMAGE;
 const DEFAULT_PORT = 18789;
+
+export function resolveLocalRuntimeModelEndpoint(endpoint: string, runtime?: ContainerRuntime | string): string {
+  return resolveEndpointForContainer(endpoint, runtime);
+}
 const GCP_SA_CONTAINER_PATH = "/home/node/.openclaw/gcp/sa.json";
 const LITELLM_CONFIG_PATH = "/home/node/.openclaw/litellm/config.yaml";
 const LITELLM_KEY_PATH = "/home/node/.openclaw/litellm/master-key";
@@ -65,6 +78,7 @@ const SANDBOX_SSH_DIR = "/home/node/.openclaw/sandbox-ssh";
 const SANDBOX_SSH_IDENTITY_CONTAINER_PATH = `${SANDBOX_SSH_DIR}/identity`;
 const SANDBOX_SSH_CERTIFICATE_CONTAINER_PATH = `${SANDBOX_SSH_DIR}/certificate.pub`;
 const SANDBOX_SSH_KNOWN_HOSTS_CONTAINER_PATH = `${SANDBOX_SSH_DIR}/known_hosts`;
+const AUTH_PROFILE_IMPORT_CONTAINER_PATH = "/tmp/openclaw-auth-profiles/auth-profiles.json";
 
 /** Returns true if the image tag is `:latest` or absent — mutable tags that should always be pulled. */
 export function shouldAlwaysPull(image: string): boolean {
@@ -224,6 +238,15 @@ export function buildSavedInstanceEnvContent(config: DeployConfig, name: string)
   if (config.openaiApiKey && (!config.openaiApiKeyRef || usesDefaultEnvSecretRef(config.openaiApiKeyRef))) {
     lines.push(`OPENAI_API_KEY=${config.openaiApiKey}`);
   }
+  if (config.codexOauthMode) {
+    lines.push(`CODEX_OAUTH_MODE=${config.codexOauthMode}`);
+  }
+  if (config.codexOauthProfileId) {
+    lines.push(`CODEX_OAUTH_PROFILE_ID=${config.codexOauthProfileId}`);
+  }
+  if (config.codexOauthAuthJsonPath) {
+    lines.push(`CODEX_OAUTH_AUTH_JSON_PATH=${config.codexOauthAuthJsonPath}`);
+  }
   if (config.googleApiKey && (!config.googleApiKeyRef || usesDefaultEnvSecretRef(config.googleApiKeyRef))) {
     lines.push(`GEMINI_API_KEY=${config.googleApiKey}`);
   }
@@ -235,6 +258,12 @@ export function buildSavedInstanceEnvContent(config: DeployConfig, name: string)
   }
   if (config.openaiModel) {
     lines.push(`OPENAI_MODEL=${config.openaiModel}`);
+  }
+  if (config.codexModel) {
+    lines.push(`CODEX_MODEL=${config.codexModel}`);
+  }
+  if (config.codexModels && config.codexModels.length > 0) {
+    lines.push(`CODEX_MODELS_B64=${encodeEnvValue(JSON.stringify(config.codexModels))}`);
   }
   if (config.googleModel) {
     lines.push(`GOOGLE_MODEL=${config.googleModel}`);
@@ -304,6 +333,12 @@ export function buildSavedInstanceEnvContent(config: DeployConfig, name: string)
     }
     if (config.otelImage) {
       lines.push(`OTEL_IMAGE=${config.otelImage}`);
+    }
+  }
+  if (config.chromiumSidecar) {
+    lines.push(`CHROMIUM_SIDECAR=true`);
+    if (config.chromiumImage) {
+      lines.push(`CHROMIUM_IMAGE=${config.chromiumImage}`);
     }
   }
   if (config.telegramBotToken && (!config.telegramBotTokenRef || usesDefaultEnvSecretRef(config.telegramBotTokenRef))) {
@@ -409,11 +444,114 @@ function prepareLocalSandboxSshConfig(config: DeployConfig): {
   return { effectiveConfig };
 }
 
+function prepareLocalCodexOauthConfig(config: DeployConfig): DeployConfig {
+  if (
+    config.inferenceProvider !== OPENAI_CODEX_PROVIDER
+    || config.codexOauthMode === "profile"
+    || config.codexOauthAuthJson?.trim()
+  ) {
+    return config;
+  }
+
+  const authPath = normalizeHostPath(config.codexOauthAuthJsonPath)
+    || join(homedir(), ".codex", "auth.json");
+  if (!existsSync(authPath)) {
+    throw new Error(`Codex OAuth auth.json file not found: ${authPath}`);
+  }
+
+  const authJson = readFileSync(authPath, "utf8");
+  buildCodexOauthCredentialFromCliAuthJson(authJson);
+  return {
+    ...config,
+    codexOauthAuthJsonPath: authPath,
+    codexOauthAuthJson: authJson,
+  };
+}
+
+async function importLocalCodexAuthProfiles(params: {
+  runtime: ContainerRuntime;
+  config: DeployConfig;
+  image: string;
+  agentIds: string[];
+  log: LogCallback;
+}): Promise<void> {
+  const authProfilesJson = codexOauthAuthProfileStoreJson(params.config);
+  if (!authProfilesJson) {
+    return;
+  }
+
+  const authProfileImportLines = (sourcePath: string) =>
+    Array.from(new Set(params.agentIds))
+      .map((agentId) =>
+        `if [ -f '${sourcePath}' ]; then mkdir -p /home/node/.openclaw/agents/${agentId}/agent && cp '${sourcePath}' /home/node/.openclaw/agents/${agentId}/agent/auth-profiles.json && chmod 600 /home/node/.openclaw/agents/${agentId}/agent/auth-profiles.json; fi`
+      )
+      .join("\n");
+
+  if (params.runtime === "podman") {
+    const secretName = `openclaw-codex-auth-${uuid()}`;
+    const secretPath = `/run/secrets/${secretName}`;
+    const authProfileImportDir = join(tmpdir(), `openclaw-auth-profiles-${uuid()}`);
+    const authProfileImportPath = join(authProfileImportDir, "auth-profiles.json");
+    await mkdir(authProfileImportDir, { recursive: true });
+    await writeFile(authProfileImportPath, authProfilesJson, { mode: 0o600 });
+    try {
+      await execFileAsync("podman", ["secret", "create", secretName, authProfileImportPath]);
+      params.log("Importing Codex OAuth profile into local OpenClaw state via Podman secret");
+      const result = await runCommand(params.runtime, [
+        "run", "--rm",
+        ...localStateMountArgs(params.config),
+        "--secret", `${secretName},type=mount`,
+        params.image,
+        "sh", "-c", [
+          authProfileImportLines(secretPath),
+          runtimeOwnershipFixupCommand(),
+        ].join("\n"),
+      ], params.log);
+      if (result.code !== 0) {
+        throw new Error("Failed to import Codex OAuth profile into local runtime state");
+      }
+      return;
+    } finally {
+      await execFileAsync("podman", ["secret", "rm", secretName]).catch(() => undefined);
+      await rm(authProfileImportDir, { recursive: true, force: true });
+    }
+  }
+
+  const authProfileImportDir = join(tmpdir(), `openclaw-auth-profiles-${uuid()}`);
+  await mkdir(authProfileImportDir, { recursive: true });
+  await writeFile(join(authProfileImportDir, "auth-profiles.json"), authProfilesJson, { mode: 0o600 });
+
+  try {
+    params.log("Importing Codex OAuth profile into local OpenClaw state");
+    const result = await runCommand(params.runtime, [
+      "run", "--rm",
+      "--user", "0",
+      ...localStateMountArgs(params.config),
+      "-v", bindMountSpec(authProfileImportDir, "/tmp/openclaw-auth-profiles", "ro"),
+      params.image,
+      "sh", "-c", [
+        authProfileImportLines(AUTH_PROFILE_IMPORT_CONTAINER_PATH),
+        runtimeOwnershipFixupCommand(),
+      ].join("\n"),
+    ], params.log);
+    if (result.code !== 0) {
+      throw new Error("Failed to import Codex OAuth profile into local runtime state");
+    }
+  } finally {
+    await rm(authProfileImportDir, { recursive: true, force: true });
+  }
+}
+
 
 /**
  * Derive the model ID based on configured provider.
  */
 function deriveModel(config: DeployConfig): string {
+  if (config.inferenceProvider === "custom-endpoint") {
+    return config.modelEndpointModel?.trim()
+      ? normalizeModelRef(config, config.modelEndpointModel)
+      : `${CUSTOM_ENDPOINT_PROVIDER}/default`;
+  }
   if (config.agentModel) {
     return normalizeModelRef(config, config.agentModel);
   }
@@ -423,16 +561,14 @@ function deriveModel(config: DeployConfig): string {
   if (config.inferenceProvider === "openai") {
     return `openai/${config.openaiModel?.trim() || "gpt-5.4"}`;
   }
+  if (config.inferenceProvider === OPENAI_CODEX_PROVIDER) {
+    return normalizeCodexModelRef(config.codexModel);
+  }
   if (config.inferenceProvider === GOOGLE_PROVIDER) {
     return `${GOOGLE_PROVIDER}/${config.googleModel?.trim() || "gemini-3.1-pro-preview"}`;
   }
   if (config.inferenceProvider === OPENROUTER_PROVIDER) {
     return normalizeModelRef(config, config.openrouterModel?.trim() || "auto");
-  }
-  if (config.inferenceProvider === "custom-endpoint") {
-    return config.modelEndpointModel?.trim()
-      ? normalizeModelRef(config, config.modelEndpointModel)
-      : `${CUSTOM_ENDPOINT_PROVIDER}/default`;
   }
   if (config.inferenceProvider === "vertex-anthropic") {
     const model = config.vertexAnthropicModel?.trim() || config.agentModel?.trim() || "claude-sonnet-4-6";
@@ -452,6 +588,9 @@ function deriveModel(config: DeployConfig): string {
   }
   if (config.openaiApiKey || config.openaiApiKeyRef) {
     return "openai/gpt-5.4";
+  }
+  if (config.codexOauthAuthJson || config.codexOauthProfileId) {
+    return normalizeCodexModelRef(config.codexModel);
   }
   if (config.googleApiKey || config.googleApiKeyRef) {
     return `${GOOGLE_PROVIDER}/gemini-3.1-pro-preview`;
@@ -669,18 +808,15 @@ function attachSecretHandlingConfig(ocConfig: Record<string, unknown>, config: D
     providersMap[OPENROUTER_PROVIDER] = openrouterProvider;
   }
   if (config.modelEndpoint?.trim()) {
-    const providerApiKeyRef = modelEndpointApiKeyRef || openaiApiKeyRef;
     const endpointProvider: Record<string, unknown> = {
       ...((providersMap[CUSTOM_ENDPOINT_PROVIDER] as Record<string, unknown> | undefined) || {}),
-      baseUrl: config.modelEndpoint.trim(),
+      baseUrl: resolveLocalRuntimeModelEndpoint(config.modelEndpoint.trim(), config.containerRuntime),
       api: "openai-completions",
       models: Array.isArray((providersMap[CUSTOM_ENDPOINT_PROVIDER] as Record<string, unknown> | undefined)?.models)
         ? (providersMap[CUSTOM_ENDPOINT_PROVIDER] as Record<string, unknown>).models
         : [],
     };
-    if (providerApiKeyRef) {
-      endpointProvider.apiKey = cloneSecretRef(providerApiKeyRef);
-    }
+    endpointProvider.apiKey = modelEndpointApiKeyRef ? cloneSecretRef(modelEndpointApiKeyRef) : undefined;
     if (config.modelEndpointModel?.trim()) {
       const modelId = config.modelEndpointModel.trim();
       endpointProvider.models = [{ id: modelId, name: config.modelEndpointModelLabel?.trim() || modelId }];
@@ -876,6 +1012,21 @@ function buildOpenClawConfig(config: DeployConfig, gatewayToken: string): string
     cron: { enabled: !!config.cronEnabled },
   };
 
+  // Add browser config for Chromium sidecar
+  if (shouldUseChromiumSidecar(config)) {
+    ocConfig.browser = {
+      enabled: true,
+      defaultProfile: "openclaw",
+      profiles: {
+        openclaw: {
+          cdpUrl: `http://localhost:${CHROMIUM_CDP_PORT}`,
+          attachOnly: true,
+          color: "#4285F4",
+        },
+      },
+    };
+  }
+
   const sandboxToolPolicy = buildSandboxToolPolicy(config);
   if (sandboxToolPolicy) {
     ocConfig.tools = sandboxToolPolicy;
@@ -900,6 +1051,7 @@ function buildOpenClawConfig(config: DeployConfig, gatewayToken: string): string
     ocConfig.mcp = { servers: mcpServers };
   }
 
+  attachCodexOauthConfig(ocConfig, config);
   attachSecretHandlingConfig(ocConfig, config);
 
   return JSON.stringify(ocConfig);
@@ -1059,8 +1211,11 @@ function localStateMountArgs(config: DeployConfig): string[] {
   return ["-v", `${volumeName(config)}:/home/node/.openclaw`];
 }
 
-function runtimeOwnershipFixupCommand(): string {
-  return "chown -R node:node /home/node/.openclaw 2>/dev/null || true";
+export function runtimeOwnershipFixupCommand(): string {
+  // Fix for #71: strip world bits after chown so other users/processes on the
+  // host cannot read credentials (gateway tokens, API key refs) from openclaw.json
+  // or traverse the state directory.
+  return "chown -R node:node /home/node/.openclaw 2>/dev/null || true && chmod -R o-rwx /home/node/.openclaw 2>/dev/null || true";
 }
 
 /**
@@ -1080,7 +1235,8 @@ function buildRunArgs(
   const image = resolveImage(effectiveConfig);
   const useProxy = shouldUseLitellmProxy(effectiveConfig) && !!litellmMasterKey;
   const useOtelSidecar = shouldUseOtel(effectiveConfig) && !!otelEnvVars;
-  const hasSidecars = useProxy || useOtelSidecar;
+  const useChromium = shouldUseChromiumSidecar(effectiveConfig);
+  const hasSidecars = useProxy || useOtelSidecar || useChromium;
   const isPodman = runtime === "podman";
 
   const runArgs = [
@@ -1100,7 +1256,9 @@ function buildRunArgs(
     // Docker: share the first sidecar's network namespace
     const networkContainer = useProxy
       ? litellmContainerName(effectiveConfig)
-      : otelContainerName(effectiveConfig);
+      : useOtelSidecar
+        ? otelContainerName(effectiveConfig)
+        : chromiumContainerName(effectiveConfig);
     runArgs.push("--network", `container:${networkContainer}`);
   } else {
     runArgs.push("-p", `${port}:18789`);
@@ -1136,7 +1294,7 @@ function buildRunArgs(
     env[openrouterEnvRefId] = effectiveConfig.openrouterApiKey;
   }
   if (effectiveConfig.modelEndpoint) {
-    env.MODEL_ENDPOINT = effectiveConfig.modelEndpoint;
+    env.MODEL_ENDPOINT = resolveLocalRuntimeModelEndpoint(effectiveConfig.modelEndpoint, runtime);
   }
   if (effectiveConfig.modelEndpointApiKey) {
     env.MODEL_ENDPOINT_API_KEY = effectiveConfig.modelEndpointApiKey;
@@ -1183,6 +1341,11 @@ function buildRunArgs(
     Object.assign(env, otelEnvVars);
   }
 
+  // Chromium CDP env var (tell the agent where to connect to the browser)
+  if (useChromium) {
+    Object.assign(env, chromiumAgentEnv());
+  }
+
   for (const [key, val] of Object.entries(env)) {
     runArgs.push("-e", `${key}=${val}`);
   }
@@ -1195,7 +1358,7 @@ function buildRunArgs(
   runArgs.push(image);
 
   // Bind to lan (0.0.0.0) so port mapping works from host into pod/container
-  runArgs.push("node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789");
+  runArgs.push("sh", "-c", "umask 007 && exec node dist/index.js gateway --bind lan --port 18789");
 
   return runArgs;
 }
@@ -1248,11 +1411,13 @@ export class LocalDeployer implements Deployer {
     log("Initializing local state...");
 
     const localSandboxPrepared = prepareLocalSandboxSshConfig(config);
+    const localCodexPrepared = prepareLocalCodexOauthConfig(localSandboxPrepared.effectiveConfig);
     const activeConfig = await withActivePodmanSecretMappings(
-      localSandboxPrepared.effectiveConfig,
+      localCodexPrepared,
       runtime,
       log,
     );
+    const runtimeConfig: DeployConfig = { ...activeConfig, containerRuntime: runtime };
 
     const agentId = `${config.prefix || "openclaw"}_${config.agentName}`;
     const workspaceDir = `/home/node/.openclaw/workspace-${agentId}`;
@@ -1260,13 +1425,13 @@ export class LocalDeployer implements Deployer {
 
     // Build init script: write config + workspace files on first deploy
     const gatewayToken = generateToken();
-    const ocConfig = buildOpenClawConfig(activeConfig, gatewayToken);
+    const ocConfig = buildOpenClawConfig(runtimeConfig, gatewayToken);
 
     // Fix for #67: warn when bundle subagent models reference unavailable providers
     if (sourceBundle?.agents) {
-      const deployModel = deriveModel(activeConfig);
+      const deployModel = deriveModel(runtimeConfig);
       for (const entry of sourceBundle.agents) {
-        if (entry.model?.primary && detectUnavailableProvider(entry.model.primary, activeConfig)) {
+        if (entry.model?.primary && detectUnavailableProvider(entry.model.primary, runtimeConfig)) {
           log(`WARNING: Subagent "${entry.id}" prefers model "${entry.model.primary}" but that provider does not appear to be configured. The deploy-time model "${deployModel}" has been added as a fallback.`);
         }
       }
@@ -1432,6 +1597,16 @@ Use this table to track verified peer OpenClaw instances.
     if (initResult.code !== 0) {
       throw new Error("Failed to initialize config volume");
     }
+    await importLocalCodexAuthProfiles({
+      runtime,
+      config: runtimeConfig,
+      image,
+      agentIds: [
+        agentId,
+        ...((sourceBundle?.agents || []).map((entry) => entry.id).filter(Boolean)),
+      ],
+      log,
+    });
     log(`Default agent provisioned: ${config.agentDisplayName || config.agentName} (${agentId})`);
 
     // Write GCP SA JSON into volume as a separate step (avoids heredoc/shell escaping issues)
@@ -1627,7 +1802,81 @@ Use this table to track verified peer OpenClaw instances.
       (rt, nm) => removeContainer(rt as ContainerRuntime, nm),
     );
 
-    const runArgs = buildRunArgs(activeConfig, runtime, name, port, litellmMasterKey, otelEnv);
+    // Create pod for Chromium sidecar if it's the only sidecar
+    const useChromium = shouldUseChromiumSidecar(config);
+    if (useChromium && !useProxy && !useOtelSidecars && runtime === "podman") {
+      const pod = podName(config);
+      await runCommand(runtime, ["pod", "rm", "-f", pod], () => {});
+      const podPorts = ["-p", `${port}:18789`];
+      await runCommand(runtime, [
+        "pod", "create", "--name", pod, ...podPorts,
+      ], log);
+    }
+
+    // Start Chromium browser sidecar if enabled
+    if (useChromium) {
+      const chromiumImage = config.chromiumImage || CHROMIUM_IMAGE;
+      const chromiumName = chromiumContainerName(config);
+      const isPodman = runtime === "podman";
+
+      try {
+        await execFileAsync(runtime, ["image", "exists", chromiumImage]);
+        log(`Using local Chromium image: ${chromiumImage}`);
+      } catch {
+        log(`Pulling Chromium image ${chromiumImage}...`);
+        const pull = await runCommand(runtime, ["pull", chromiumImage], log);
+        if (pull.code !== 0) {
+          throw new Error("Failed to pull Chromium image");
+        }
+      }
+
+      await removeContainer(runtime, chromiumName);
+
+      const chromiumRunArgs = [
+        "run", "-d",
+        "--name", chromiumName,
+        "--shm-size=256m",
+        "--init",
+      ];
+
+      if (isPodman) {
+        chromiumRunArgs.push("--pod", podName(config));
+      } else if (useProxy) {
+        chromiumRunArgs.push("--network", `container:${litellmContainerName(config)}`);
+      } else if (useOtelSidecars) {
+        chromiumRunArgs.push("--network", `container:${otelContainerName(config)}`);
+      } else {
+        // Chromium is the only sidecar — publish gateway port
+        chromiumRunArgs.push("-p", `${port}:18789`);
+      }
+
+      chromiumRunArgs.push(chromiumImage);
+
+      const chromiumResult = await runCommand(runtime, chromiumRunArgs, log);
+      if (chromiumResult.code !== 0) {
+        throw new Error("Failed to start Chromium sidecar");
+      }
+
+      log("Waiting for Chromium browser to be ready...");
+      for (let i = 0; i < 15; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        try {
+          const { stdout } = await execFileAsync(runtime, [
+            "exec", chromiumName, "wget", "-q", "-O-", `http://localhost:${CHROMIUM_CDP_PORT}/json/version`,
+          ]);
+          if (stdout.includes("webSocketDebuggerUrl") || stdout.includes("WebSocket")) {
+            log("Chromium browser is ready");
+            break;
+          }
+        } catch {
+          if (i === 14) {
+            log("WARNING: Chromium readiness check timed out — proceeding anyway");
+          }
+        }
+      }
+    }
+
+    const runArgs = buildRunArgs(runtimeConfig, runtime, name, port, litellmMasterKey, otelEnv);
 
     log(`Starting OpenClaw container: ${name}`);
     const run = await runCommand(runtime, runArgs, log);
@@ -1637,7 +1886,7 @@ Use this table to track verified peer OpenClaw instances.
 
     log("");
     log("=== Container Info ===");
-    const hasSidecars = useProxy || !!otelEnv;
+    const hasSidecars = useProxy || !!otelEnv || useChromium;
     if (hasSidecars) {
       const isPodman = runtime === "podman";
       if (isPodman) {
@@ -1647,6 +1896,7 @@ Use this table to track verified peer OpenClaw instances.
       if (useProxy) log(`LiteLLM container: ${litellmContainerName(config)}`);
       if (otelEnv) log(`OTEL container:    ${otelContainerName(config)}`);
       if (config.otelJaeger) log(`Jaeger container:  ${jaegerContainerName(config)}`);
+      if (useChromium) log(`Chromium container: ${chromiumContainerName(config)}`);
       log("");
       if (config.otelJaeger) log(`Jaeger UI: http://localhost:${JAEGER_UI_PORT}`);
       log("");
@@ -1658,6 +1908,7 @@ Use this table to track verified peer OpenClaw instances.
       if (useProxy) log(`  ${runtime} logs ${litellmContainerName(config)}  # LiteLLM proxy logs`);
       if (otelEnv) log(`  ${runtime} logs ${otelContainerName(config)}  # OTEL collector logs`);
       if (config.otelJaeger) log(`  ${runtime} logs ${jaegerContainerName(config)}  # Jaeger logs`);
+      if (useChromium) log(`  ${runtime} logs ${chromiumContainerName(config)}  # Chromium browser logs`);
     } else {
       log(`Container: ${name}`);
       log("");
@@ -1666,7 +1917,7 @@ Use this table to track verified peer OpenClaw instances.
     }
 
     // Extract and save gateway token to host filesystem
-    await this.saveInstanceInfo(runtime, name, activeConfig, log, gatewayToken);
+    await this.saveInstanceInfo(runtime, name, runtimeConfig, log, gatewayToken);
 
     const url = `http://localhost:${port}`;
     log(`OpenClaw running at ${url}`);
@@ -1676,7 +1927,7 @@ Use this table to track verified peer OpenClaw instances.
       id,
       mode: "local",
       status: "running",
-      config: { ...activeConfig, containerRuntime: runtime },
+      config: runtimeConfig,
       startedAt: new Date().toISOString(),
       url,
       containerId: name,
@@ -1687,23 +1938,25 @@ Use this table to track verified peer OpenClaw instances.
     const runtime = result.config.containerRuntime ?? (await detectRuntime());
     if (!runtime) throw new Error("No container runtime found");
     const localSandboxPrepared = prepareLocalSandboxSshConfig(result.config);
+    const localCodexPrepared = prepareLocalCodexOauthConfig(localSandboxPrepared.effectiveConfig);
     const effectiveConfig = await withActivePodmanSecretMappings(
-      localSandboxPrepared.effectiveConfig,
+      localCodexPrepared,
       runtime,
       log,
     );
-    const name = result.containerId ?? containerName(effectiveConfig);
-    const port = effectiveConfig.port ?? DEFAULT_PORT;
-    const image = resolveImage(effectiveConfig);
-    const vol = result.volumeName ?? volumeName(effectiveConfig);
+    const runtimeConfig: DeployConfig = { ...effectiveConfig, containerRuntime: runtime };
+    const name = result.containerId ?? containerName(runtimeConfig);
+    const port = runtimeConfig.port ?? DEFAULT_PORT;
+    const image = resolveImage(runtimeConfig);
+    const vol = result.volumeName ?? volumeName(runtimeConfig);
     const isContainerized = existsSync("/.dockerenv") || existsSync("/run/.containerenv");
 
     // Copy updated agent files from host into volume before starting
-      const agentId = `${effectiveConfig.prefix || "openclaw"}_${effectiveConfig.agentName}`;
-    const agentSourceDir = normalizeHostPath(effectiveConfig.agentSourceDir) || defaultAgentSourceDir(isContainerized);
+      const agentId = `${runtimeConfig.prefix || "openclaw"}_${runtimeConfig.agentName}`;
+    const agentSourceDir = normalizeHostPath(runtimeConfig.agentSourceDir) || defaultAgentSourceDir(isContainerized);
 
     const bootstrapGatewayToken = await this.readSavedToken(name) || generateToken();
-    const ocConfig = buildOpenClawConfig(effectiveConfig, bootstrapGatewayToken);
+    const ocConfig = buildOpenClawConfig(runtimeConfig, bootstrapGatewayToken);
     const ocConfigB64 = Buffer.from(ocConfig).toString("base64");
     const bootstrapResult = await runCommand(runtime, [
       "run", "--rm",
@@ -1723,6 +1976,18 @@ Use this table to track verified peer OpenClaw instances.
     if (bootstrapResult.code !== 0) {
       throw new Error("Failed to initialize local runtime state");
     }
+
+    const sourceBundle = loadAgentSourceBundle(runtimeConfig);
+    await importLocalCodexAuthProfiles({
+      runtime,
+      config: runtimeConfig,
+      image,
+      agentIds: [
+        agentId,
+        ...((sourceBundle?.agents || []).map((entry) => entry.id).filter(Boolean)),
+      ],
+      log,
+    });
 
     if (effectiveConfig.gcpServiceAccountJson) {
       const b64 = Buffer.from(effectiveConfig.gcpServiceAccountJson).toString("base64");
@@ -1746,12 +2011,11 @@ Use this table to track verified peer OpenClaw instances.
     if (hasWorkspaceDirs) {
       log("Updating agent files from host...");
       const workspaceDir = `/home/node/.openclaw/workspace-${agentId}`;
-      const bundleForCopy = loadAgentSourceBundle(effectiveConfig);
       const copyScript = [
         `for d in /tmp/agent-source/workspace-*; do`,
         `  if [ -d "$d" ]; then`,
         `    base="$(basename "$d")"`,
-        `    ${mainWorkspaceShellCondition(workspaceDir, bundleForCopy)}`,
+        `    ${mainWorkspaceShellCondition(workspaceDir, sourceBundle)}`,
         `    mkdir -p "$dest"`,
         `    cp -r "$d"/* "$dest"/ 2>/dev/null || true`,
         `  fi`,
@@ -1916,6 +2180,17 @@ Use this table to track verified peer OpenClaw instances.
       ], log);
     }
 
+    // Create pod for Chromium sidecar if it's the only sidecar
+    const useChromiumSidecar = shouldUseChromiumSidecar(effectiveConfig);
+    if (useChromiumSidecar && !useProxy && !useOtelSidecars && runtime === "podman") {
+      const pod = podName(effectiveConfig);
+      await runCommand(runtime, ["pod", "rm", "-f", pod], () => {});
+      const podPorts = ["-p", `${port}:18789`];
+      await runCommand(runtime, [
+        "pod", "create", "--name", pod, ...podPorts,
+      ], log);
+    }
+
     // Restart Jaeger sidecar if enabled
     if (effectiveConfig.otelJaeger) {
       await startJaegerSidecar(
@@ -1933,17 +2208,44 @@ Use this table to track verified peer OpenClaw instances.
       (rt, nm) => removeContainer(rt as ContainerRuntime, nm),
     );
 
+    // Restart Chromium sidecar if enabled
+    if (useChromiumSidecar) {
+      const chromiumImage = effectiveConfig.chromiumImage || CHROMIUM_IMAGE;
+      const chromiumName = chromiumContainerName(effectiveConfig);
+      const isPodman = runtime === "podman";
+
+      await removeContainer(runtime, chromiumName);
+
+      const chromiumRunArgs = [
+        "run", "-d",
+        "--name", chromiumName,
+        "--shm-size=256m",
+        "--init",
+      ];
+
+      if (isPodman) {
+        chromiumRunArgs.push("--pod", podName(effectiveConfig));
+      } else if (useProxy) {
+        chromiumRunArgs.push("--network", `container:${litellmContainerName(effectiveConfig)}`);
+      } else if (useOtelSidecars) {
+        chromiumRunArgs.push("--network", `container:${otelContainerName(effectiveConfig)}`);
+      } else {
+        chromiumRunArgs.push("-p", `${port}:18789`);
+      }
+
+      chromiumRunArgs.push(chromiumImage);
+
+      await runCommand(runtime, chromiumRunArgs, log);
+    }
+
     log(`Starting OpenClaw container: ${name}`);
-    const runArgs = buildRunArgs(effectiveConfig, runtime, name, port, litellmMasterKey, otelEnv);
+    const runArgs = buildRunArgs(runtimeConfig, runtime, name, port, litellmMasterKey, otelEnv);
     const run = await runCommand(runtime, runArgs, log);
     if (run.code !== 0) {
       throw new Error("Failed to start container");
     }
 
-    const persistedConfig = {
-      ...effectiveConfig,
-      containerRuntime: runtime,
-    };
+    const persistedConfig = runtimeConfig;
     if (bootstrapGatewayToken) {
       await this.saveInstanceInfo(runtime, name, persistedConfig, log, bootstrapGatewayToken);
     } else {
@@ -2154,6 +2456,16 @@ Use this table to track verified peer OpenClaw instances.
     // Stop OTEL sidecar if it exists
     await stopOtelSidecar(result.config, runtime, log, runCommand);
 
+    // Stop Chromium sidecar if it exists
+    const chromiumName = chromiumContainerName(result.config);
+    try {
+      await execFileAsync(runtime, ["inspect", chromiumName]);
+      log(`Stopping Chromium sidecar: ${chromiumName}`);
+      await runCommand(runtime, ["stop", chromiumName], log);
+    } catch {
+      // No sidecar running
+    }
+
     // Remove podman pod if it exists
     if (isPodman) {
       const pod = podName(result.config);
@@ -2181,6 +2493,7 @@ Use this table to track verified peer OpenClaw instances.
     await removeContainer(runtime, litellmName);
     await removeContainer(runtime, otelContainerName(result.config));
     await removeContainer(runtime, jaegerContainerName(result.config));
+    await removeContainer(runtime, chromiumContainerName(result.config));
 
     // Remove podman pod if it exists
     if (isPodman) {

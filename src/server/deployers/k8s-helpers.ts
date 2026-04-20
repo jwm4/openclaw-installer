@@ -3,12 +3,20 @@ import { randomBytes } from "node:crypto";
 import type { DeployConfig, DeployModelOption, DeploySecretRef } from "./types.js";
 import { shouldUseLitellmProxy, litellmModelName, litellmRegisteredModelNames, LITELLM_PORT } from "./litellm.js";
 import { shouldUseOtel, OTEL_HTTP_PORT } from "./otel.js";
+import { shouldUseChromiumSidecar, CHROMIUM_CDP_PORT } from "./chromium.js";
 import { buildSandboxConfig } from "./sandbox.js";
 import { buildSandboxToolPolicy } from "./tool-policy.js";
 import { loadAgentSourceBundle, loadAgentSourceMcpServers } from "./agent-source.js";
 import type { AgentSourceBundle } from "./agent-source.js";
 import { normalizeManagedVaultProviders } from "./vault-helper.js";
 import { hasPodmanSecretTarget } from "../../shared/podman-secrets.js";
+import {
+  OPENAI_CODEX_PROVIDER,
+  attachCodexOauthConfig,
+  codexModelIdFromRef,
+  codexOauthAuthProfileStoreJson,
+  normalizeCodexModelRef,
+} from "./codex-oauth.js";
 
 export const DEFAULT_IMAGE = process.env.OPENCLAW_IMAGE || "ghcr.io/openclaw/openclaw:latest";
 export const DEFAULT_VERTEX_IMAGE = process.env.OPENCLAW_VERTEX_IMAGE || DEFAULT_IMAGE;
@@ -75,17 +83,20 @@ export function normalizeModelRef(config: DeployConfig, modelRef: string): strin
   if (config.inferenceProvider === OPENROUTER_PROVIDER) {
     return trimmed.startsWith(`${OPENROUTER_PROVIDER}/`) ? trimmed : `${OPENROUTER_PROVIDER}/${trimmed}`;
   }
+  if (config.inferenceProvider === "custom-endpoint") {
+    return trimmed.startsWith(`${CUSTOM_ENDPOINT_PROVIDER}/`) ? trimmed : `${CUSTOM_ENDPOINT_PROVIDER}/${trimmed}`;
+  }
   if (trimmed.includes("/")) return trimmed;
 
   if (config.inferenceProvider === "anthropic") return `anthropic/${trimmed}`;
   if (config.inferenceProvider === "openai") {
     return `openai/${trimmed}`;
   }
+  if (config.inferenceProvider === OPENAI_CODEX_PROVIDER) {
+    return normalizeCodexModelRef(trimmed);
+  }
   if (config.inferenceProvider === GOOGLE_PROVIDER) {
     return `${GOOGLE_PROVIDER}/${trimmed}`;
-  }
-  if (config.inferenceProvider === "custom-endpoint") {
-    return `${CUSTOM_ENDPOINT_PROVIDER}/${trimmed}`;
   }
   // Fix for #1: check litellm proxy before falling back to direct vertex providers
   if (config.inferenceProvider === "vertex-anthropic") {
@@ -153,6 +164,13 @@ export function buildConfiguredAgentModelCatalog(
     },
     {
       ref: normalizeProviderModelRef(
+        OPENAI_CODEX_PROVIDER,
+        config.codexModel || (config.inferenceProvider === OPENAI_CODEX_PROVIDER ? "gpt-5.4" : undefined),
+      ),
+      alias: codexModelIdFromRef(config.codexModel || "gpt-5.4"),
+    },
+    {
+      ref: normalizeProviderModelRef(
         GOOGLE_PROVIDER,
         config.googleModel
           || ((config.googleApiKey || config.googleApiKeyRef || hasLocalProviderSecret(config, "GEMINI_API_KEY") || hasLocalProviderSecret(config, "GOOGLE_API_KEY"))
@@ -194,6 +212,12 @@ export function buildConfiguredAgentModelCatalog(
     if (!trimmed) continue;
     const ref = trimmed.includes("/") ? trimmed : `openai/${trimmed}`;
     catalog[ref] = { alias: trimmed };
+  }
+  for (const modelId of config.codexModels || []) {
+    const trimmed = modelId.trim();
+    if (!trimmed) continue;
+    const ref = normalizeCodexModelRef(trimmed);
+    catalog[ref] = { alias: codexModelIdFromRef(trimmed) };
   }
   for (const modelId of config.googleModels || []) {
     const trimmed = modelId.trim();
@@ -266,6 +290,11 @@ function buildAgentModelConfig(config: DeployConfig, primaryModelRef: string): {
 }
 
 export function deriveModel(config: DeployConfig): string {
+  if (config.inferenceProvider === "custom-endpoint") {
+    return config.modelEndpointModel?.trim()
+      ? normalizeModelRef(config, config.modelEndpointModel)
+      : `${CUSTOM_ENDPOINT_PROVIDER}/default`;
+  }
   if (config.agentModel) return normalizeModelRef(config, config.agentModel);
   if (config.inferenceProvider === "anthropic") {
     return `anthropic/${config.anthropicModel?.trim() || "claude-sonnet-4-6"}`;
@@ -273,16 +302,14 @@ export function deriveModel(config: DeployConfig): string {
   if (config.inferenceProvider === "openai") {
     return `openai/${config.openaiModel?.trim() || "gpt-5.4"}`;
   }
+  if (config.inferenceProvider === OPENAI_CODEX_PROVIDER) {
+    return normalizeCodexModelRef(config.codexModel);
+  }
   if (config.inferenceProvider === GOOGLE_PROVIDER) {
     return `${GOOGLE_PROVIDER}/${config.googleModel?.trim() || "gemini-3.1-pro-preview"}`;
   }
   if (config.inferenceProvider === OPENROUTER_PROVIDER) {
     return normalizeProviderModelRef(OPENROUTER_PROVIDER, config.openrouterModel) || `${OPENROUTER_PROVIDER}/auto`;
-  }
-  if (config.inferenceProvider === "custom-endpoint") {
-    return config.modelEndpointModel?.trim()
-      ? normalizeModelRef(config, config.modelEndpointModel)
-      : `${CUSTOM_ENDPOINT_PROVIDER}/default`;
   }
   if (config.inferenceProvider === "vertex-anthropic") {
     const model = config.vertexAnthropicModel?.trim() || config.agentModel?.trim() || "claude-sonnet-4-6";
@@ -301,6 +328,7 @@ export function deriveModel(config: DeployConfig): string {
       : "google-vertex/gemini-2.5-pro";
   }
   if (config.openaiApiKey || config.openaiApiKeyRef) return "openai/gpt-5.4";
+  if (config.codexOauthAuthJson || config.codexOauthProfileId) return normalizeCodexModelRef(config.codexModel);
   if (config.googleApiKey || config.googleApiKeyRef) return `${GOOGLE_PROVIDER}/gemini-3.1-pro-preview`;
   if (config.openrouterApiKey || config.openrouterApiKeyRef) return `${OPENROUTER_PROVIDER}/auto`;
   if (config.modelEndpoint) {
@@ -375,6 +403,10 @@ export function detectUnavailableProvider(
     case "openai":
       return !config.openaiApiKey && !config.openaiApiKeyRef
         && config.inferenceProvider !== "openai";
+    case OPENAI_CODEX_PROVIDER:
+      return config.inferenceProvider !== OPENAI_CODEX_PROVIDER
+        && !config.codexOauthAuthJson
+        && !config.codexOauthProfileId;
     case GOOGLE_PROVIDER:
       return !config.googleApiKey && !config.googleApiKeyRef
         && config.inferenceProvider !== GOOGLE_PROVIDER;
@@ -511,6 +543,11 @@ export function buildManagedAgentAuthProfiles(config: DeployConfig): {
     : undefined;
 }
 
+export function buildManagedAgentAuthProfilesSecretJson(config: DeployConfig): string | undefined {
+  const baseProfiles = buildManagedAgentAuthProfiles(config)?.profiles || {};
+  return codexOauthAuthProfileStoreJson(config, baseProfiles);
+}
+
 function attachSecretHandlingConfig(ocConfig: Record<string, unknown>, config: DeployConfig): void {
   const providers = parseSecretProvidersJson(config.secretsProvidersJson) || {};
   let shouldDefineDefaultEnvProvider = false;
@@ -587,7 +624,6 @@ function attachSecretHandlingConfig(ocConfig: Record<string, unknown>, config: D
     providersMap[OPENROUTER_PROVIDER] = openrouterProvider;
   }
   if (config.modelEndpoint?.trim()) {
-    const providerApiKeyRef = modelEndpointApiKeyRef || openaiApiKeyRef;
     const endpointProvider: Record<string, unknown> = {
       ...((providersMap[CUSTOM_ENDPOINT_PROVIDER] as Record<string, unknown> | undefined) || {}),
       baseUrl: config.modelEndpoint.trim(),
@@ -596,9 +632,7 @@ function attachSecretHandlingConfig(ocConfig: Record<string, unknown>, config: D
         ? (providersMap[CUSTOM_ENDPOINT_PROVIDER] as Record<string, unknown>).models
         : [],
     };
-    if (providerApiKeyRef) {
-      endpointProvider.apiKey = cloneSecretRef(providerApiKeyRef);
-    }
+    endpointProvider.apiKey = modelEndpointApiKeyRef ? cloneSecretRef(modelEndpointApiKeyRef) : undefined;
     if (config.modelEndpointModel?.trim()) {
       const modelId = config.modelEndpointModel.trim();
       endpointProvider.models = [{ id: modelId, name: config.modelEndpointModelLabel?.trim() || modelId }];
@@ -754,6 +788,21 @@ export function buildOpenClawConfig(config: DeployConfig, gatewayToken: string):
     cron: { enabled: !!config.cronEnabled },
   };
 
+  // Add browser config for Chromium sidecar
+  if (shouldUseChromiumSidecar(config)) {
+    ocConfig.browser = {
+      enabled: true,
+      defaultProfile: "openclaw",
+      profiles: {
+        openclaw: {
+          cdpUrl: `http://localhost:${CHROMIUM_CDP_PORT}`,
+          attachOnly: true,
+          color: "#4285F4",
+        },
+      },
+    };
+  }
+
   const sandboxToolPolicy = buildSandboxToolPolicy(config);
   if (sandboxToolPolicy) {
     ocConfig.tools = sandboxToolPolicy;
@@ -772,6 +821,7 @@ export function buildOpenClawConfig(config: DeployConfig, gatewayToken: string):
     ocConfig.mcp = { servers: mcpServers };
   }
 
+  attachCodexOauthConfig(ocConfig, config);
   attachSecretHandlingConfig(ocConfig, config);
 
   return ocConfig;
